@@ -7,12 +7,7 @@ All HTTP calls are mocked — no real network I/O.
 from __future__ import annotations
 
 import json
-from datetime import date
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helper factories
@@ -834,7 +829,6 @@ class TestCliTimeline:
     def test_run_timeline_json_output(self, mock_build):
         import io
         import json as _json
-        import sys
 
         from manus_use.cli import _run_timeline
 

@@ -192,10 +192,10 @@ class VulnerabilityIntelligenceAgent:
             from strands import Agent
             from strands_tools import current_time
 
+            from manus_use.tools.get_cve_timeline import get_cve_timeline
             from manus_use.tools.get_epss_trend import get_epss_trend
             from manus_use.tools.get_github_advisory import get_github_advisory
             from manus_use.tools.get_patch_diff import get_patch_diff
-            from manus_use.tools.get_cve_timeline import get_cve_timeline
             from manus_use.tools.get_poc_week import get_poc_week
             from manus_use.tools.get_trickest_pocs import get_trickest_pocs
         except ImportError as exc:  # pragma: no cover - depends on env
