@@ -46,6 +46,8 @@ dependencies = [
     "kaleido>=0.2.1",
     "langchain-aws>=0.2.11",
     "readabilipy==0.2.0",
+    "packaging>=24.0",
+    "requests>=2.32.0",
 ]
 
 [project.urls]

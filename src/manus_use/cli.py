@@ -1052,6 +1052,7 @@ _SUBCOMMANDS = {
     "epss-trend",
     "patch-diff",
     "compare",
+    "version-range",
 }
 
 
@@ -1289,6 +1290,65 @@ def _run_compare(argv: list[str]) -> int:
 
     # Text output
     print(_render_text(comparison))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# version-range subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_version_range_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-use version-range",
+        description=(
+            "Resolve the exact affected and patched version ranges for a CVE.\n"
+            "Parses NVD CPE match data and cross-references with PyPI, npm, or\n"
+            "Maven Central to show which released versions are vulnerable and\n"
+            "which version first shipped the fix."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--ecosystem",
+        choices=["auto", "pypi", "npm", "maven"],
+        default="auto",
+        help="Package ecosystem to cross-reference (default: auto-detect from CPE data)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_version_range(argv: list[str]) -> int:
+    parser = _build_version_range_parser()
+    args = parser.parse_args(argv)
+
+    cve_id = args.cve_id.strip()
+    if not cve_id.upper().startswith("CVE-"):
+        print(f"[error] Invalid CVE ID '{cve_id}'. Must be like 'CVE-YYYY-NNNN'.", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_use.tools.get_version_ranges import _render_text, resolve_version_ranges
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    report = resolve_version_ranges(cve_id.upper(), ecosystem=args.ecosystem)
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print(_render_text(report))
     return 0
 
 
@@ -1599,6 +1659,10 @@ def main() -> None:
     if first_positional == "compare":
         idx = argv.index("compare")
         sys.exit(_run_compare(argv[idx + 1 :]))
+
+    if first_positional == "version-range":
+        idx = argv.index("version-range")
+        sys.exit(_run_version_range(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")

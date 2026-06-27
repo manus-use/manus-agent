@@ -285,6 +285,45 @@ cross-referencing three data sources.
 |------|---------|-------------|
 | `--output {text,json}` | `text` | Output format; `json` includes the full comparison |
 
+### `manus-use version-range <CVE-ID>` — Affected version range resolver
+
+```bash
+# Show which released versions are vulnerable and which first ships the fix
+manus-use version-range CVE-2024-3094
+
+# Force PyPI registry cross-reference
+manus-use version-range CVE-2024-3094 --ecosystem pypi
+
+# Machine-readable output
+manus-use version-range CVE-2024-3094 --output json | jq .ranges
+```
+
+Parses the NVD CPE configuration data for a CVE and cross-references it with
+package release histories from [PyPI](https://pypi.org),
+[npm](https://registry.npmjs.org), or [Maven Central](https://search.maven.org)
+to produce a concrete version range report:
+
+- **Vulnerable range** — the semver constraints declared in NVD CPE data
+  (e.g. `>= 1.0.0, < 1.3.0`)
+- **Affected releases** — the concrete released versions that fall inside the
+  vulnerable range, with their release dates
+- **First patched release** — the earliest release that falls outside the
+  vulnerable range (the version you should upgrade to)
+
+Ecosystem detection is automatic (`auto`) — the tool infers PyPI / npm / Maven
+from the CPE vendor and product names. Override with `--ecosystem` when
+auto-detection fails.
+
+Useful for answering *"which exact versions of package X are affected?"* without
+manually parsing CPE strings, and composable with `patch-diff` and `analyze`.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ecosystem {auto,pypi,npm,maven}` | `auto` | Registry to cross-reference (auto-detected from CPE) |
+| `--output {text,json}` | `text` | Output format; `json` includes the full time-series |
+
 ### `manus-use discover` — CVE discovery
 
 ```bash
@@ -530,6 +569,10 @@ manus-use remediate CVE-2024-3094
 # Compare two CVEs side-by-side for triage prioritisation
 manus-use compare CVE-2024-3094 CVE-2021-44228
 manus-use compare CVE-2024-3094 CVE-2021-44228 --output json | jq .higher_priority
+
+# Resolve affected version ranges (which releases are vulnerable vs patched)
+manus-use version-range CVE-2024-3094
+manus-use version-range CVE-2024-3094 --output json | jq .ranges
 
 # Discover new high-EPSS CVEs from the last 2 weeks
 manus-use discover --since 2025-06-12 --min-epss 0.6
