@@ -120,6 +120,7 @@ def _make_mock_response(json_data: dict, status_code: int = 200) -> MagicMock:
     resp.raise_for_status = MagicMock()
     return resp
 
+
 # ---------------------------------------------------------------------------
 # Import helpers
 # ---------------------------------------------------------------------------

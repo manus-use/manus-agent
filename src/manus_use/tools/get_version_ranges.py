@@ -545,8 +545,7 @@ def resolve_version_ranges(cve_id: str, ecosystem: str = "auto") -> dict[str, An
         if not package_found:
             # Return the raw CPE range without release cross-reference
             entry["note"] = (
-                "Package not found in registry or ecosystem unknown — "
-                "showing raw CPE version constraints only."
+                "Package not found in registry or ecosystem unknown — showing raw CPE version constraints only."
             )
             entry["affected_versions"] = []
             entry["first_patched_version"] = None
