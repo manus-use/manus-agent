@@ -94,6 +94,11 @@ Your process is optimized to build a comprehensive picture from authoritative, f
   - A direct link to the commit on GitHub.
   If no commit is found (private repo or non-GitHub), note this and proceed.
 
+**Step 6b: Silent Patch Check (Optional)**
+- If the CVE's affected repository is a public GitHub repo (e.g. extracted from NVD references or GHSA), call `find_silent_patches` with that repo and a date range of ~90 days centred on the CVE disclosure date.
+- Report any high-score candidates (score ≥ 20) as potential related silent fixes — commits in the same codebase that look like security patches but carry no CVE reference.
+- This step is optional; skip it if the affected repository cannot be determined or if the CVE is not associated with a public GitHub project.
+
 **Step 7: Analyze Weakness**
 - From the NVD data, find the CWE ID and use the `get_cwe_details` tool to understand the software weakness.
 
@@ -184,6 +189,7 @@ class VulnerabilityIntelligenceAgent:
             from strands import Agent
             from strands_tools import current_time
 
+            from manus_use.tools.find_silent_patches import find_silent_patches
             from manus_use.tools.get_epss_trend import get_epss_trend
             from manus_use.tools.get_github_advisory import get_github_advisory
             from manus_use.tools.get_patch_diff import get_patch_diff
@@ -240,6 +246,7 @@ class VulnerabilityIntelligenceAgent:
             "manus_use.tools.verify_exploit",
             get_epss_trend,
             get_patch_diff,
+            find_silent_patches,
         ]
         if use_browser is not None:
             tools.append(use_browser)

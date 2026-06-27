@@ -325,6 +325,56 @@ History is stored at `~/.manus-use/history.jsonl`.
 
 ---
 
+### `manus-use silent-patches <owner/repo>` — Silent patch detector
+
+```bash
+# Scan the last 90 days of commits for silent security fixes
+manus-use silent-patches django/django
+
+# Narrow the date window
+manus-use silent-patches curl/curl --since 2024-01-01 --until 2024-06-01
+
+# Machine-readable output for scripting / SIEM ingestion
+manus-use silent-patches owner/repo --output json | jq '.candidates[] | select(.score >= 30)'
+
+# Fast mode: message keywords only (no diff fetch — much faster)
+manus-use silent-patches torvalds/linux --fast --max-commits 500
+```
+
+Scans a public GitHub repository's commit history for potential silent security
+fixes — commits that look like security patches (based on keywords in the commit
+message and/or diff) but have **no associated CVE or GHSA reference**.
+
+Silent patches are a major blind spot in CVE-based vulnerability management.
+Vendors sometimes quietly fix security bugs without filing a CVE — either
+deliberately (to limit exposure) or because the fix predates the CVE assignment.
+
+**How it works:**
+
+1. Fetches the commit list from the GitHub REST API (paginates up to `--max-commits`).
+2. Skips any commit whose message already contains `CVE-XXXX-YYYY` or `GHSA-…` (overt disclosures).
+3. Scores remaining commits on security keyword frequency in the commit message
+   (high-signal: `vulnerability`, `overflow`, `injection`, `auth bypass`, `RCE`;
+   lower-signal: `fix`, `sanitize`, `escape`, `validate`).
+4. For commits that pass the message threshold, fetches the unified diff and scores
+   it on security-sensitive code patterns (`html.escape`, `check_permission`,
+   `is_authenticated`, `parameterized`, `shell=False`, …).
+5. Infers the most likely bug class from the diff (`xss`, `sql_injection`,
+   `auth_bypass`, `buffer_overflow`, `deserialization`, …).
+6. Returns candidates sorted by suspicion score (0–100), descending.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--since YYYY-MM-DD` | 90 days ago | Start date for the scan window |
+| `--until YYYY-MM-DD` | today | End date for the scan window |
+| `--max-commits N` | `200` | Maximum commits to inspect (max 500) |
+| `--fast` | off | Skip diff scan; rely only on commit-message keywords |
+| `--output {text,json}` | `text` | Output format; `json` includes the full candidate list |
+
+---
+
 ## Configuration
 
 Create `~/.manus-use/config.toml` (or run `manus-use init`):
@@ -533,6 +583,10 @@ manus-use compare CVE-2024-3094 CVE-2021-44228 --output json | jq .higher_priori
 
 # Discover new high-EPSS CVEs from the last 2 weeks
 manus-use discover --since 2025-06-12 --min-epss 0.6
+
+# Scan a repo for silent security fixes (no CVE reference)
+manus-use silent-patches django/django
+manus-use silent-patches curl/curl --since 2024-01-01 --output json | jq '.candidates[] | select(.score >= 25)'
 ```
 
 > **Important:** These tools are designed for defensive security purposes only. Use them for legitimate security research, vulnerability management, and defence.

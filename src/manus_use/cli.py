@@ -1052,6 +1052,7 @@ _SUBCOMMANDS = {
     "epss-trend",
     "patch-diff",
     "compare",
+    "silent-patches",
 }
 
 
@@ -1219,6 +1220,97 @@ def _run_patch_diff(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# silent-patches subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_silent_patches_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-use silent-patches",
+        description=(
+            "Scan a GitHub repository's commit history for potential silent security\n"
+            "fixes — commits that look like security patches (based on keywords in\n"
+            "the commit message or diff) but have no associated CVE/GHSA reference.\n"
+            "\n"
+            "Useful for finding vulnerabilities that were quietly fixed without a CVE,\n"
+            "or that the vendor chose not to disclose publicly."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "repo",
+        metavar="OWNER/REPO",
+        help="GitHub repository to scan, e.g. 'django/django' or 'curl/curl'",
+    )
+    p.add_argument(
+        "--since",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Scan commits after this date (default: 90 days ago)",
+    )
+    p.add_argument(
+        "--until",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Scan commits before this date (default: today)",
+    )
+    p.add_argument(
+        "--max-commits",
+        type=int,
+        default=200,
+        metavar="N",
+        help="Maximum number of commits to inspect (default: 200, max: 500)",
+    )
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Skip diff scan; rely only on commit-message keywords (faster, less precise)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_silent_patches(argv: list[str]) -> int:
+    parser = _build_silent_patches_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_use.tools.find_silent_patches import (
+            find_silent_patches_impl,
+            render_silent_patches_text,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    result = find_silent_patches_impl(
+        repo=args.repo,
+        since=args.since,
+        until=args.until,
+        max_commits=args.max_commits,
+        fast=args.fast,
+    )
+
+    if "error" in result:
+        print(f"[error] {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(result, indent=2))
+        return 0
+
+    print(render_silent_patches_text(result))
+    return 0
+
+
 # compare subcommand
 # ---------------------------------------------------------------------------
 
@@ -1334,6 +1426,11 @@ def _build_run_parser() -> argparse.ArgumentParser:
             "  # CVE remediation guidance\n"
             "  manus-use remediate CVE-2024-3094\n"
             "  manus-use remediate CVE-2024-3094 --output json\n"
+            "  \n"
+            "  # Silent patch detection\n"
+            "  manus-use silent-patches django/django\n"
+            "  manus-use silent-patches curl/curl --since 2024-01-01 --output json\n"
+            "  manus-use silent-patches owner/repo --fast --max-commits 100\n"
         ),
     )
     parser.add_argument(
@@ -1599,6 +1696,10 @@ def main() -> None:
     if first_positional == "compare":
         idx = argv.index("compare")
         sys.exit(_run_compare(argv[idx + 1 :]))
+
+    if first_positional == "silent-patches":
+        idx = argv.index("silent-patches")
+        sys.exit(_run_silent_patches(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
