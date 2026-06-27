@@ -682,14 +682,20 @@ def test_cli_parser_all_flags():
     from manus_use.cli import _build_silent_patches_parser
 
     p = _build_silent_patches_parser()
-    args = p.parse_args([
-        "django/django",
-        "--since", "2024-01-01",
-        "--until", "2024-06-01",
-        "--max-commits", "100",
-        "--fast",
-        "--output", "json",
-    ])
+    args = p.parse_args(
+        [
+            "django/django",
+            "--since",
+            "2024-01-01",
+            "--until",
+            "2024-06-01",
+            "--max-commits",
+            "100",
+            "--fast",
+            "--output",
+            "json",
+        ]
+    )
     assert args.repo == "django/django"
     assert args.since == "2024-01-01"
     assert args.until == "2024-06-01"

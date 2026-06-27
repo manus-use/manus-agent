@@ -66,10 +66,7 @@ TOOL_SPEC = {
             "properties": {
                 "repo": {
                     "type": "string",
-                    "description": (
-                        "GitHub repository in 'owner/repo' format "
-                        "(e.g., 'django/django' or 'curl/curl')."
-                    ),
+                    "description": ("GitHub repository in 'owner/repo' format (e.g., 'django/django' or 'curl/curl')."),
                 },
                 "since": {
                     "type": "string",
@@ -89,10 +86,7 @@ TOOL_SPEC = {
                 },
                 "max_commits": {
                     "type": "integer",
-                    "description": (
-                        "Maximum number of commits to inspect. "
-                        "Defaults to 200. Maximum 500."
-                    ),
+                    "description": ("Maximum number of commits to inspect. Defaults to 200. Maximum 500."),
                 },
                 "fast": {
                     "type": "boolean",
@@ -118,8 +112,8 @@ _MSG_KEYWORDS: list[tuple[str, int]] = [
     (r"\bsecurity\b", 20),
     (r"\bvulnerabilit", 20),
     (r"\bexploit\b", 20),
-    (r"\bcve-\d{4}-\d+", 25),          # would be CVE — included to *exclude* later
-    (r"\bghsa-", 20),                   # GitHub Security Advisory
+    (r"\bcve-\d{4}-\d+", 25),  # would be CVE — included to *exclude* later
+    (r"\bghsa-", 20),  # GitHub Security Advisory
     (r"\badvisory\b", 15),
     # Medium-signal
     (r"\bsanitize\b", 12),
@@ -153,7 +147,7 @@ _MSG_KEYWORDS: list[tuple[str, int]] = [
     (r"\bformat[- ]string\b", 15),
     (r"\btype[- ]confusion\b", 15),
     (r"\bunintended\b", 6),
-    (r"\bfix\b", 5),                    # generic but common in security patches
+    (r"\bfix\b", 5),  # generic but common in security patches
     (r"\bpatch\b", 5),
     (r"\bmitigat", 8),
     (r"\bharden", 8),
@@ -326,10 +320,7 @@ def _list_commits(
     page = 1
     per_page = min(100, max_commits)
     while len(commits) < max_commits:
-        url = (
-            f"https://api.github.com/repos/{repo}/commits"
-            f"?since={since}&until={until}&per_page={per_page}&page={page}"
-        )
+        url = f"https://api.github.com/repos/{repo}/commits?since={since}&until={until}&per_page={per_page}&page={page}"
         try:
             data = _fetch_json(url, headers=headers)
         except requests.HTTPError as exc:
@@ -460,9 +451,7 @@ def find_silent_patches_impl(
     ]
     if candidates:
         top = candidates[0]
-        summary_parts.append(
-            f"Highest-suspicion commit: {top['sha']} (score {top['score']}) — '{top['message'][:60]}'"
-        )
+        summary_parts.append(f"Highest-suspicion commit: {top['sha']} (score {top['score']}) — '{top['message'][:60]}'")
 
     return {
         "repo": repo,
