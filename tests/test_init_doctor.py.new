@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "<string>", line 45, in <module>
+AssertionError: P2 not found exactly once
+P1 occurrences: 1
+P2 occurrences: 0

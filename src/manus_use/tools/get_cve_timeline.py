@@ -39,9 +39,7 @@ from manus_use.tools.tool_output_logger import log_tool_output_size
 _NVD_CVE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
 _GHSA_API_URL = "https://api.github.com/advisories?cve_id={cve_id}"
 _EPSS_API_URL = "https://api.first.org/data/v1/epss"
-_CISA_KEV_URL = (
-    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
-)
+_CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 _TRICKEST_URL = "https://raw.githubusercontent.com/trickest/cve/main/{year}/{cve_id}.md"
 
 _EPSS_SPIKE_THRESHOLD = 0.10
@@ -112,9 +110,8 @@ def _commit_date(api_url: str) -> str | None:
         if not resp.ok:
             return None
         data = resp.json()
-        raw = (
-            data.get("commit", {}).get("committer", {}).get("date")
-            or data.get("commit", {}).get("author", {}).get("date")
+        raw = data.get("commit", {}).get("committer", {}).get("date") or data.get("commit", {}).get("author", {}).get(
+            "date"
         )
         return _iso_date(raw)
     except Exception:
@@ -159,15 +156,11 @@ def _fetch_ghsa_patch_date(cve_id: str) -> tuple[str | None, str | None]:
             url = ref if isinstance(ref, str) else ref.get("url", "")
             m = re.search(r"github\.com/([^/]+/[^/]+)/commit/([0-9a-f]{7,40})", url)
             if m:
-                api_url = (
-                    f"https://api.github.com/repos/{m.group(1)}/commits/{m.group(2)}"
-                )
+                api_url = f"https://api.github.com/repos/{m.group(1)}/commits/{m.group(2)}"
                 cd = _commit_date(api_url)
                 if cd:
                     return cd, url
-                published = _iso_date(
-                    advisory.get("published_at") or advisory.get("updated_at")
-                )
+                published = _iso_date(advisory.get("published_at") or advisory.get("updated_at"))
                 return published, url
 
         published = _iso_date(advisory.get("published_at") or advisory.get("updated_at"))
@@ -191,9 +184,7 @@ def _fetch_nvd_patch_date(cve_id: str) -> tuple[str | None, str | None]:
             url = ref.get("url", "")
             m = re.search(r"github\.com/([^/]+/[^/]+)/commit/([0-9a-f]{7,40})", url)
             if m:
-                api_url = (
-                    f"https://api.github.com/repos/{m.group(1)}/commits/{m.group(2)}"
-                )
+                api_url = f"https://api.github.com/repos/{m.group(1)}/commits/{m.group(2)}"
                 cd = _commit_date(api_url)
                 if cd:
                     hits.append((cd, url))
@@ -387,9 +378,7 @@ def build_cve_timeline(cve_id: str) -> dict[str, Any]:
         velocity["poc_to_kev_days"] = poc2kev
 
     weaponized_date = kev_date or epss_spike_date
-    weaponized_source = (
-        "CISA KEV" if kev_date else ("EPSS spike" if epss_spike_date else None)
-    )
+    weaponized_source = "CISA KEV" if kev_date else ("EPSS spike" if epss_spike_date else None)
     d2w = _days_between(disclosure_date, weaponized_date)
     if d2w is not None and weaponized_source:
         velocity["disclosure_to_weaponized_days"] = d2w
@@ -433,9 +422,7 @@ def render_timeline_text(timeline: dict[str, Any]) -> str:
         lines.append("  Insufficient data to compute velocity.")
     else:
         if "days_since_disclosure" in velocity:
-            lines.append(
-                f"  Days since disclosure       : {velocity['days_since_disclosure']}"
-            )
+            lines.append(f"  Days since disclosure       : {velocity['days_since_disclosure']}")
         if "disclosure_to_patch_days" in velocity:
             d = velocity["disclosure_to_patch_days"]
             flag = "  (patch preceded disclosure?)" if d < 0 else ""
@@ -445,14 +432,11 @@ def render_timeline_text(timeline: dict[str, Any]) -> str:
             fast = "  [FAST <=7 days]" if velocity.get("fast_weaponisation") else ""
             lines.append(f"  Disclosure -> First PoC      : {d} days{fast}")
         if "poc_to_kev_days" in velocity:
-            lines.append(
-                f"  PoC -> CISA KEV listing      : {velocity['poc_to_kev_days']} days"
-            )
+            lines.append(f"  PoC -> CISA KEV listing      : {velocity['poc_to_kev_days']} days")
         if "disclosure_to_weaponized_days" in velocity:
             src = velocity.get("weaponized_source", "")
             lines.append(
-                f"  Disclosure -> Weaponized     : "
-                f"{velocity['disclosure_to_weaponized_days']} days  (via {src})"
+                f"  Disclosure -> Weaponized     : {velocity['disclosure_to_weaponized_days']} days  (via {src})"
             )
 
     return "\n".join(lines)
@@ -468,9 +452,7 @@ def get_cve_timeline(tool: ToolUse, **kwargs: Any) -> ToolResult:
         result: ToolResult = {
             "toolUseId": tool_use_id,
             "status": "error",
-            "content": [
-                {"text": "Invalid CVE ID format. Must be a string like CVE-YYYY-NNNN."}
-            ],
+            "content": [{"text": "Invalid CVE ID format. Must be a string like CVE-YYYY-NNNN."}],
         }
         log_tool_output_size("get_cve_timeline", result)
         return result

@@ -223,9 +223,7 @@ class TestFetchGhsaPatchDate:
         }
         advisory = {
             "published_at": "2024-04-05T12:00:00Z",
-            "references": [
-                {"url": "https://github.com/org/repo/commit/abc1234567890abcdef"}
-            ],
+            "references": [{"url": "https://github.com/org/repo/commit/abc1234567890abcdef"}],
             "html_url": "https://github.com/advisories/GHSA-test",
         }
 
@@ -409,9 +407,7 @@ class TestFetchCisaKev:
         from manus_use.tools.get_cve_timeline import _fetch_cisa_kev
 
         kev_data = {
-            "vulnerabilities": [
-                {"cveID": "cve-2024-3094", "dateAdded": "2024-04-10", "requiredAction": "Patch"}
-            ]
+            "vulnerabilities": [{"cveID": "cve-2024-3094", "dateAdded": "2024-04-10", "requiredAction": "Patch"}]
         }
         mock_get.return_value = _mock_resp(kev_data)
         d, _ = _fetch_cisa_kev("CVE-2024-3094")
@@ -449,9 +445,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_all_events_present(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_all_events_present(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {"published": "2024-03-29", "nvd_url": "https://nvd.nist.gov/"}
@@ -477,9 +471,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_events_sorted_chronologically(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_events_sorted_chronologically(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {"published": "2024-03-29", "nvd_url": "https://nvd.nist.gov/"}
@@ -499,9 +491,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_velocity_disclosure_to_poc(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_velocity_disclosure_to_poc(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {"published": "2024-03-29", "nvd_url": "https://nvd.nist.gov/"}
@@ -542,9 +532,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_weaponized_source_prefers_kev(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_weaponized_source_prefers_kev(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {"published": "2024-01-01", "nvd_url": "https://nvd.nist.gov/"}
@@ -563,9 +551,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_weaponized_source_falls_back_to_epss(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_weaponized_source_falls_back_to_epss(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {"published": "2024-01-01", "nvd_url": "https://nvd.nist.gov/"}
@@ -584,9 +570,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_no_events_when_all_sources_fail(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_no_events_when_all_sources_fail(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {}
@@ -606,9 +590,7 @@ class TestBuildCveTimeline:
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_ghsa_patch_date")
     @patch("manus_use.tools.get_cve_timeline._fetch_nvd_info")
-    def test_kev_date_from_nvd_when_cisa_missing(
-        self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev
-    ):
+    def test_kev_date_from_nvd_when_cisa_missing(self, m_nvd, m_ghsa, m_nvd_patch, m_trickest, m_epss, m_kev):
         from manus_use.tools.get_cve_timeline import build_cve_timeline
 
         m_nvd.return_value = {

@@ -26,8 +26,7 @@ sse_url = getattr(getattr(config, "mcp", None), "server_url", None) or os.enviro
 
 if not sse_url:
     raise ValueError(
-        "MCP SSE server URL not configured. "
-        "Set [mcp] server_url in config.toml or export MCP_SSE_URL=<url>."
+        "MCP SSE server URL not configured. Set [mcp] server_url in config.toml or export MCP_SSE_URL=<url>."
     )
 
 # Connect to the MCP server and run a quick sanity task
