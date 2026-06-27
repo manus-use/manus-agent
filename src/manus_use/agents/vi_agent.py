@@ -94,6 +94,14 @@ Your process is optimized to build a comprehensive picture from authoritative, f
   - A direct link to the commit on GitHub.
   If no commit is found (private repo or non-GitHub), note this and proceed.
 
+**Step 6b: CVE Lifecycle Timeline**
+- Call `get_cve_timeline` with the CVE ID to build the full lifecycle timeline.
+  Include in the report a "Timeline" section showing:
+  - Disclosure date, patch date, first public PoC date, EPSS spike date, CISA KEV date.
+  - Velocity metrics: days from disclosure to PoC, PoC to KEV, disclosure to weaponisation.
+  - Flag `fast_weaponisation=true` (PoC in <=7 days) prominently — it indicates this class of bug is actively
+    targeted and defenders have almost no window.
+
 **Step 7: Analyze Weakness**
 - From the NVD data, find the CWE ID and use the `get_cwe_details` tool to understand the software weakness.
 
@@ -184,6 +192,7 @@ class VulnerabilityIntelligenceAgent:
             from strands import Agent
             from strands_tools import current_time
 
+            from manus_use.tools.get_cve_timeline import get_cve_timeline
             from manus_use.tools.get_epss_trend import get_epss_trend
             from manus_use.tools.get_github_advisory import get_github_advisory
             from manus_use.tools.get_patch_diff import get_patch_diff
@@ -240,6 +249,7 @@ class VulnerabilityIntelligenceAgent:
             "manus_use.tools.verify_exploit",
             get_epss_trend,
             get_patch_diff,
+            get_cve_timeline,
         ]
         if use_browser is not None:
             tools.append(use_browser)

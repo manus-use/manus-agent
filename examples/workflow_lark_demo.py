@@ -15,12 +15,12 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-from strands import Agent
-from strands_tools import stop, think
+from strands import Agent  # noqa: E402
+from strands_tools import stop, think  # noqa: E402
 
-import manus_use.tools.create_lark_document as create_lark_document
-import manus_use.tools.workflow_tool as workflow_tool
-from manus_use.config import Config
+import manus_use.tools.create_lark_document as create_lark_document  # noqa: E402
+import manus_use.tools.workflow_tool as workflow_tool  # noqa: E402
+from manus_use.config import Config  # noqa: E402
 
 SYSTEM_PROMPT = (
     "You are a cybersecurity and vulnerability intelligence expert and a Workflow "

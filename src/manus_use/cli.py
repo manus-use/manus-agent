@@ -1052,6 +1052,7 @@ _SUBCOMMANDS = {
     "epss-trend",
     "patch-diff",
     "compare",
+    "timeline",
 }
 
 
@@ -1219,6 +1220,58 @@ def _run_patch_diff(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# timeline subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_timeline_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-use timeline",
+        description=(
+            "Build a structured lifecycle timeline for a CVE.\n"
+            "Aggregates key dates from NVD, GHSA, Trickest PoC index, FIRST.org EPSS,\n"
+            "and CISA KEV to show: disclosure -> patch -> first PoC -> EPSS spike -> weaponisation.\n"
+            "Also computes velocity metrics (days between events)."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_timeline(argv: list[str]) -> int:
+    parser = _build_timeline_parser()
+    args = parser.parse_args(argv)
+
+    cve_id = args.cve_id.strip()
+    if not cve_id.upper().startswith("CVE-"):
+        print(f"[error] Invalid CVE ID '{cve_id}'. Must be like 'CVE-YYYY-NNNN'.", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_use.tools.get_cve_timeline import build_cve_timeline, render_timeline_text
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    timeline = build_cve_timeline(cve_id)
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(timeline, indent=2))
+        return 0
+
+    print(render_timeline_text(timeline))
+    return 0
+
+
 # compare subcommand
 # ---------------------------------------------------------------------------
 
@@ -1321,6 +1374,10 @@ def _build_run_parser() -> argparse.ArgumentParser:
             "  # Patch diff summariser (fixing-commit analysis)\n"
             "  manus-use patch-diff CVE-2024-3094\n"
             "  manus-use patch-diff CVE-2024-3094 --output json\n"
+            "\n"
+            "  # CVE lifecycle timeline (disclosure -> patch -> PoC -> weaponisation)\n"
+            "  manus-use timeline CVE-2024-3094\n"
+            "  manus-use timeline CVE-2024-3094 --output json | jq .velocity\n"
             "\n"
             "  # Vulnerability intelligence analysis\n"
             "  manus-use analyze CVE-2025-6554\n"
@@ -1599,6 +1656,10 @@ def main() -> None:
     if first_positional == "compare":
         idx = argv.index("compare")
         sys.exit(_run_compare(argv[idx + 1 :]))
+
+    if first_positional == "timeline":
+        idx = argv.index("timeline")
+        sys.exit(_run_timeline(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")

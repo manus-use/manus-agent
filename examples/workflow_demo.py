@@ -95,8 +95,7 @@ def main() -> None:
     print("\n--- Vulnerability research workflow ---")
     print(
         agent.handle_request(
-            "Assess the 2 most recent high-severity vulnerabilities. "
-            "Use the most appropriate agent type for each step."
+            "Assess the 2 most recent high-severity vulnerabilities. Use the most appropriate agent type for each step."
         )
     )
 
