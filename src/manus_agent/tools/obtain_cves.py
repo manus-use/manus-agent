@@ -3,6 +3,8 @@ from typing import Any
 import requests
 from strands.types.tools import ToolUse
 
+from manus_agent.tools.get_nvd_data import _nvd_get_with_retry
+
 # --- Strands Tool Definition ---
 TOOL_SPEC = {
     "name": "obtain_cves",
@@ -35,8 +37,7 @@ def _get_all_cves_from_nvd(start_date, end_date):
     start_index = 0
     while True:
         url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?pubStartDate={start}&pubEndDate={end}&cvssV3Severity=HIGH&cvssV3Severity=CRITICAL&cvssV4Severity=HIGH&cvssV4Severity=CRITICAL&resultsPerPage=100&startIndex={start_index}"
-        response = requests.get(url)
-        response.raise_for_status()
+        response = _nvd_get_with_retry(url)
         data = response.json()
         vulnerabilities = data.get("vulnerabilities", [])
         cves.extend(vulnerabilities)
