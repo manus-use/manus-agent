@@ -406,18 +406,29 @@ def test_kev_network_failure_sets_error(mock_get, monkeypatch):
 
 @patch("manus_agent.tools.get_vulncheck_data.requests.get")
 def test_kev_failure_still_tries_nvd2(mock_get, monkeypatch):
-    """Even if KEV fails, NVD2 should still be attempted."""
+    """Even if KEV fails (after all retries), NVD2 should still be attempted."""
     import requests as req_lib
 
-    monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
-    # First call (KEV) → error; second call (NVD2) → success
-    mock_get.side_effect = [
-        req_lib.exceptions.ConnectionError("timeout"),
-        _make_requests_response(_make_nvd2_response()),
-    ]
-    from manus_agent.tools.get_vulncheck_data import get_vulncheck_data
+    import manus_agent.tools.get_vulncheck_data as vc_mod
 
-    result = get_vulncheck_data(_make_tool_use())
+    monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
+    # Disable retries for this test so the KEV error propagates immediately.
+    orig_max = vc_mod._VC_MAX_RETRIES
+    orig_delay = vc_mod._VC_RETRY_BASE_DELAY
+    try:
+        vc_mod._VC_MAX_RETRIES = 1
+        vc_mod._VC_RETRY_BASE_DELAY = 0.0
+        # First call (KEV) → error; second call (NVD2) → success
+        mock_get.side_effect = [
+            req_lib.exceptions.ConnectionError("timeout"),
+            _make_requests_response(_make_nvd2_response()),
+        ]
+        from manus_agent.tools.get_vulncheck_data import get_vulncheck_data
+
+        result = get_vulncheck_data(_make_tool_use())
+    finally:
+        vc_mod._VC_MAX_RETRIES = orig_max
+        vc_mod._VC_RETRY_BASE_DELAY = orig_delay
     payload = result["content"][0]["json"]
     # NVD2 should have populated CPE matches
     assert len(payload["nvd2"]["cpe_matches"]) > 0
