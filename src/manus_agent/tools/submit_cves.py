@@ -148,24 +148,27 @@ def submit_cves(tool: ToolUse, **kwargs: Any) -> ToolResult:
         print(f"Warning: webhook.site failed: {e}")
     """
     # Main webhook (Lark)
-    config = Config.from_file()
-    url = getattr(getattr(config, "webhooks", None), "cve_submit_url", None)
-    if not url:
-        url = os.environ.get("CVE_SUBMIT_URL")
-    if not url:
-        raise ValueError(
-            "CVE submission webhook URL not set in config or environment. Please set [webhooks] cve_submit_url in your config.toml or the CVE_SUBMIT_URL environment variable."
-        )
-    headers = {"Content-Type": "application/json"}
-
-    critical_cves = list(
-        map(
-            lambda y: y.get("cve_id", "Unknown"),
-            filter(lambda x: "CRITICAL" in x.get("priority", "") or "HIGH" in x.get("priority", ""), cve_list),
-        )
-    )
-    print(f"{len(critical_cves)} critival vulnerabilities")
+    # NOTE: URL resolution and validation are inside the try block so that a
+    # missing-URL configuration returns {"status": "error"} instead of raising
+    # an uncaught ValueError to the caller.
     try:
+        config = Config.from_file()
+        url = getattr(getattr(config, "webhooks", None), "cve_submit_url", None)
+        if not url:
+            url = os.environ.get("CVE_SUBMIT_URL")
+        if not url:
+            raise ValueError(
+                "CVE submission webhook URL not set in config or environment. Please set [webhooks] cve_submit_url in your config.toml or the CVE_SUBMIT_URL environment variable."
+            )
+        headers = {"Content-Type": "application/json"}
+
+        critical_cves = list(
+            map(
+                lambda y: y.get("cve_id", "Unknown"),
+                filter(lambda x: "CRITICAL" in x.get("priority", "") or "HIGH" in x.get("priority", ""), cve_list),
+            )
+        )
+        print(f"{len(critical_cves)} critival vulnerabilities")
         for cve in cve_list:
             # if cve_analyzed.get(cve.get('cve_id', 'Unknown'), None):
             #   cve = cve | cve_analyzed.get(cve.get('cve_id', 'Unknown'))

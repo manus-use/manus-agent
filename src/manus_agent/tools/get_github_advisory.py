@@ -68,7 +68,7 @@ def get_github_advisory(cve_id: str) -> dict[str, Any]:
         result = {"error": f"An error occurred while querying the GitHub Advisory API: {req_err}"}
         log_tool_output_size("get_github_advisory", {"content": [{"json": result}]})
         return result
-    except (KeyError, IndexError):
+    except (KeyError, IndexError, ValueError):
         result = {"error": "Received an unexpected response format from the GitHub Advisory API."}
         log_tool_output_size("get_github_advisory", {"content": [{"json": result}]})
         return result
