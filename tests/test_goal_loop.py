@@ -23,6 +23,7 @@ def _make_response(text: str) -> dict:
 def test_validator_passes_complete_report():
     validate, _ = _import_validator()
     text = (
+        "Exploitation Status: no confirmed in-the-wild exploitation\n"
         "CVSS: 9.8 (Critical)\n"
         "Remediation: Apply patch version 1.2.3.\n"
         "Exploitability: Active exploitation observed.\n"
@@ -75,7 +76,7 @@ def test_validator_fails_multiple_missing():
 def test_validator_case_insensitive():
     validate, _ = _import_validator()
     # Lowercase variants — validator must match case-insensitively.
-    text = "cvss: 6.5. remediation: update. exploitability: network. detection: ids."
+    text = "exploitation status: none. cvss: 6.5. remediation: update. exploitability: network. detection: ids."
     assert validate(_make_response(text), None) is True
 
 
@@ -90,7 +91,7 @@ def test_validator_non_text_blocks_ignored():
     response = {
         "content": [
             {"type": "tool_use", "id": "t1"},
-            {"text": "CVSS: 9.0. Remediation: patch. Exploitability: rce. Detection: waf."},
+            {"text": "Exploitation Status: none. CVSS: 9.0. Remediation: patch. Exploitability: rce. Detection: waf."},
         ]
     }
     assert validate(response, None) is True

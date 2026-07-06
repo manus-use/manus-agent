@@ -403,4 +403,6 @@ class TestViAgentWiring:
 
         src = inspect.getsource(vi_agent)
         assert "get_osv_data" in src
-        assert "OSV.dev" in src  # system-prompt step present
+        # The OSV.dev system-prompt guidance now lives in the externalized
+        # prompt resource loaded into SYSTEM_PROMPT (see feat/vi-prompt-refactor).
+        assert "OSV.dev" in vi_agent.SYSTEM_PROMPT  # system-prompt step present

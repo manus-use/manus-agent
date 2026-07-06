@@ -55,7 +55,7 @@ For each validated PoC, classify functionality and impact (RCE vs DoS vs checker
 - `get_patch_diff` — if a fixing commit exists: files/functions changed, bug class (e.g. `auth_bypass`, `sql_injection`, `buffer_overflow`), reproduction hints from added lines, and the commit link. If none, note it.
 - `score_exploit_complexity` — score (1–5) + label (trivial…very_high), the `attacker_friendly` flag (flag prominently if true), per-dimension breakdown (LoC, auth, network hops, OS deps, chain length), and whether it derived from PoC code or CVSS vector only. This contextualizes CVSS: a 9.8 at complexity 1.5 is far more urgent than 9.8 at 4.5.
 - `get_dependency_blast_radius` — blast-radius label per package, top package's weekly downloads + dependent count, affected ecosystems. Flag a CRITICAL blast radius (>5M weekly downloads or >50K npm dependents) prominently.
-- `get_osv_data` — normalized package + version-range tuples across ecosystems, with first-fixed versions and aliases (GHSA/CVE). **Prefer OSV first-fixed versions as the upgrade targets in Remediation**; they are more precise than NVD CPE. If OSV has no package ranges, fall back to NVD/VulnCheck CPE.
+- `get_osv_data` — OSV.dev normalized package + version-range tuples across ecosystems, with first-fixed versions and aliases (GHSA/CVE). **Prefer OSV first-fixed versions as the upgrade targets in Remediation**; they are more precise than NVD CPE. If OSV has no package ranges, fall back to NVD/VulnCheck CPE.
 - `get_cwe_details` — resolve the CWE from NVD and explain the weakness.
 
 # Phase 7 — REPORT (via `create_lark_document`)
