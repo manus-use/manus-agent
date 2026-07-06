@@ -120,6 +120,13 @@ Your process is optimized to build a comprehensive picture from authoritative, f
   Use this to answer: *"how many downstream projects are exposed to this vulnerability?"*
   A CRITICAL blast radius (>5M weekly downloads or >50K npm dependents) should be flagged prominently.
 
+**Step 6d: OSV.dev Affected-Package Resolution**
+- Call `get_osv_data` with the CVE ID. OSV.dev normalises ecosystem advisories (GHSA, PyPA, npm, Go, RustSec, Maven) into concrete package + version-range tuples. Include in the report:
+  - The affected ecosystems and packages OSV lists for this CVE.
+  - Per package, the vulnerable version ranges and the first fixed version (from OSV range `introduced`/`fixed` events) -- this is the exact upgrade target for remediation.
+  - All aliases (GHSA/CVE) that refer to the same flaw.
+  Prefer OSV's per-package fixed versions when writing the Recommendations upgrade targets; they are more precise than NVD CPE ranges. If OSV has no package-level ranges, note this and rely on NVD/version-range data.
+
 **Step 7: Analyze Weakness**
 - From the NVD data, find the CWE ID and use the `get_cwe_details` tool to understand the software weakness.
 
@@ -213,6 +220,7 @@ class VulnerabilityIntelligenceAgent:
             from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
             from manus_agent.tools.get_epss_trend import get_epss_trend
             from manus_agent.tools.get_github_advisory import get_github_advisory
+            from manus_agent.tools.get_osv_data import get_osv_data
             from manus_agent.tools.get_patch_diff import get_patch_diff
             from manus_agent.tools.get_poc_week import get_poc_week
             from manus_agent.tools.get_trickest_pocs import get_trickest_pocs
@@ -269,6 +277,7 @@ class VulnerabilityIntelligenceAgent:
             get_github_advisory,
             "manus_agent.tools.verify_exploit",
             get_epss_trend,
+            get_osv_data,
             get_patch_diff,
             score_exploit_complexity,
             get_vulncheck_data,
