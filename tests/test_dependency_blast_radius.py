@@ -18,6 +18,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_npm,
     _enrich_package,
     _enrich_pypi,
+    _extract_pypi_first_release,
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
@@ -582,6 +583,137 @@ class TestEnrichPypi:
         assert result["ecosystem"] == "PyPI"
         assert result["package_name"] == "requests"
 
+    def test_returns_first_release_date_when_timestamps_present(self):
+        """_enrich_pypi should populate first_release_date when upload_time_iso_8601 present."""
+        releases = {
+            "2.28.0": [{"upload_time_iso_8601": "2022-10-03T00:00:00Z"}],
+            "0.1.0": [{"upload_time_iso_8601": "2011-02-14T12:00:00Z"}],
+            "1.0.0": [{"upload_time_iso_8601": "2012-06-03T15:33:30.215975Z"}],
+        }
+        pypi_data = {
+            "info": {
+                "name": "requests",
+                "version": "2.28.0",
+                "summary": "HTTP for Humans",
+                "project_url": "https://pypi.org/project/requests/",
+            },
+            "releases": releases,
+        }
+        pypi_resp = MagicMock()
+        pypi_resp.json.return_value = pypi_data
+        pypi_resp.raise_for_status.return_value = None
+        stats_resp = MagicMock()
+        stats_resp.raise_for_status.side_effect = Exception("429")
+        with patch("requests.get", side_effect=[pypi_resp, stats_resp]):
+            result = _enrich_pypi("requests")
+        assert result["first_release_date"] == "2011-02-14"
+        assert result["first_version"] == "0.1.0"
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 10
+
+    def test_no_first_release_when_no_timestamps(self):
+        """When release files have no upload_time_iso_8601, keys should be absent."""
+        releases = {"1.0.0": [], "2.0.0": []}
+        pypi_data = {
+            "info": {
+                "name": "mylib",
+                "version": "2.0.0",
+                "summary": "A library",
+                "project_url": "",
+            },
+            "releases": releases,
+        }
+        pypi_resp = MagicMock()
+        pypi_resp.json.return_value = pypi_data
+        pypi_resp.raise_for_status.return_value = None
+        stats_resp = MagicMock()
+        stats_resp.raise_for_status.side_effect = Exception("429")
+        with patch("requests.get", side_effect=[pypi_resp, stats_resp]):
+            result = _enrich_pypi("mylib")
+        assert "first_release_date" not in result
+        assert "first_version" not in result
+        assert "age_years" not in result
+
+
+# ===========================================================================
+# _extract_pypi_first_release
+# ===========================================================================
+
+
+class TestExtractPypiFirstRelease:
+    def test_picks_oldest_version(self):
+        releases = {
+            "1.0.0": [{"upload_time_iso_8601": "2015-01-10T00:00:00Z"}],
+            "0.1.0": [{"upload_time_iso_8601": "2013-06-20T08:30:00Z"}],
+            "2.0.0": [{"upload_time_iso_8601": "2018-03-05T12:00:00Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert result["first_version"] == "0.1.0"
+        assert result["first_release_date"] == "2013-06-20"
+        assert result["age_years"] >= 7  # 2013 → at least 7 years ago
+
+    def test_picks_oldest_file_within_version(self):
+        """Multiple upload files for the same version — pick the earliest."""
+        releases = {
+            "1.0.0": [
+                {"upload_time_iso_8601": "2014-05-01T10:00:00Z"},
+                {"upload_time_iso_8601": "2014-04-30T08:00:00Z"},  # ← earliest
+            ],
+            "2.0.0": [{"upload_time_iso_8601": "2016-11-15T00:00:00Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2014-04-30"
+
+    def test_empty_releases_returns_empty_dict(self):
+        assert _extract_pypi_first_release({}) == {}
+
+    def test_all_empty_file_lists_returns_empty_dict(self):
+        releases = {"1.0.0": [], "2.0.0": []}
+        assert _extract_pypi_first_release(releases) == {}
+
+    def test_missing_upload_time_field_skipped(self):
+        releases = {
+            "1.0.0": [{"filename": "lib-1.0.0.tar.gz"}],  # no upload_time_iso_8601
+            "2.0.0": [{"upload_time_iso_8601": "2020-07-01T00:00:00Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert result["first_version"] == "2.0.0"
+        assert result["first_release_date"] == "2020-07-01"
+
+    def test_malformed_timestamp_skipped(self):
+        releases = {
+            "1.0.0": [{"upload_time_iso_8601": "not-a-date"}],
+            "2.0.0": [{"upload_time_iso_8601": "2019-12-01T00:00:00Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert result["first_version"] == "2.0.0"
+        assert result["first_release_date"] == "2019-12-01"
+
+    def test_all_malformed_timestamps_returns_empty_dict(self):
+        releases = {
+            "1.0.0": [{"upload_time_iso_8601": "bad"}],
+            "2.0.0": [{"upload_time_iso_8601": "also-bad"}],
+        }
+        assert _extract_pypi_first_release(releases) == {}
+
+    def test_age_years_is_float_and_positive(self):
+        releases = {
+            "1.0.0": [{"upload_time_iso_8601": "2010-01-01T00:00:00Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 10
+
+    def test_microseconds_in_timestamp_handled(self):
+        """PyPI often includes microseconds: 2012-06-03T15:33:30.215975Z"""
+        releases = {
+            "1.0.0": [{"upload_time_iso_8601": "2012-06-03T15:33:30.215975Z"}],
+        }
+        result = _extract_pypi_first_release(releases)
+        assert result["first_release_date"] == "2012-06-03"
+        assert result["first_version"] == "1.0.0"
+
 
 # ===========================================================================
 # _enrich_maven
@@ -886,6 +1018,34 @@ class TestGetDependencyBlastRadius:
         ):
             result = get_dependency_blast_radius("CVE-2023-32681")
         assert "Python" in result or "PyPI" in result
+
+    def test_first_release_date_shown_in_output(self):
+        """When _enrich_package returns first_release_date, output should show 'First released:' line."""
+        pkgs = [{"name": "requests", "ecosystem": "PyPI", "version_range": "<2.29.0", "source": "osv"}]
+        pypi_stats = {
+            "ecosystem": "PyPI",
+            "package_name": "requests",
+            "weekly_downloads": 60000000,
+            "latest_version": "2.34.0",
+            "release_count": 163,
+            "first_release_date": "2011-02-14",
+            "first_version": "0.2.0",
+            "age_years": 14.4,
+        }
+        with (
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected", return_value=pkgs),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=pypi_stats,
+            ),
+        ):
+            result = get_dependency_blast_radius("CVE-2023-32681")
+        assert "First released:" in result
+        assert "2011-02-14" in result
+        assert "14.4 yrs old" in result
+        assert "0.2.0" in result
 
 
 # ===========================================================================

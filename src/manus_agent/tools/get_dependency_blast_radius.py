@@ -24,6 +24,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
@@ -323,8 +324,55 @@ def _enrich_npm(name: str) -> dict[str, Any]:
     return result
 
 
+def _extract_pypi_first_release(releases: dict[str, list[dict]]) -> dict[str, Any]:
+    """
+    Find the oldest release in a PyPI ``releases`` dict.
+
+    Each key is a version string; each value is a list of upload-file dicts,
+    each containing an ``upload_time_iso_8601`` field (e.g.
+    ``"2012-06-03T15:33:30.215975Z"``).  We scan every file across every
+    version and return the entry with the earliest timestamp.
+
+    Returns a dict with ``first_version``, ``first_release_date`` (YYYY-MM-DD),
+    and ``age_years`` (float, rounded to 1 decimal).  Returns ``{}`` when no
+    timestamp data is available.
+    """
+    earliest_ts: datetime.datetime | None = None
+    earliest_version: str | None = None
+
+    for version, files in releases.items():
+        if not files:
+            continue
+        for upload_info in files:
+            ts_str = upload_info.get("upload_time_iso_8601", "")
+            if not ts_str:
+                continue
+            try:
+                # Strip trailing 'Z' and parse as UTC
+                ts_str_clean = ts_str.rstrip("Z")
+                ts = datetime.datetime.fromisoformat(ts_str_clean).replace(tzinfo=datetime.timezone.utc)
+            except (ValueError, AttributeError):
+                continue
+            if earliest_ts is None or ts < earliest_ts:
+                earliest_ts = ts
+                earliest_version = version
+
+    if earliest_ts is None:
+        return {}
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    age_days = (now - earliest_ts).days
+    age_years = round(age_days / 365.25, 1)
+
+    return {
+        "first_version": earliest_version,
+        "first_release_date": earliest_ts.strftime("%Y-%m-%d"),
+        "age_years": age_years,
+    }
+
+
 def _enrich_pypi(name: str) -> dict[str, Any]:
-    """Fetch PyPI package metadata."""
+    """Fetch PyPI package metadata including first-release date."""
     result: dict[str, Any] = {"ecosystem": "PyPI", "package_name": name}
     try:
         pypi_data = _get(_PYPI_JSON_URL.format(name))
@@ -332,8 +380,12 @@ def _enrich_pypi(name: str) -> dict[str, Any]:
         result["description"] = info.get("summary", "")[:120]
         result["latest_version"] = info.get("version", "")
         result["home_page"] = info.get("project_url", info.get("home_page", ""))
+        releases = pypi_data.get("releases", {})
         # Total release count as a proxy for maturity
-        result["release_count"] = len(pypi_data.get("releases", {}))
+        result["release_count"] = len(releases)
+        # First release date from upload timestamps — pure stdlib, no extra HTTP call
+        first_release = _extract_pypi_first_release(releases)
+        result.update(first_release)
         # Try pypistats for download counts (rate-limited; degrade gracefully)
         try:
             stats = _get(_PYPISTATS_URL.format(name))
@@ -547,6 +599,12 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("release_count"):
                 lines.append(f"    Total releases:   {r['release_count']}")
+            if r.get("first_release_date"):
+                first_v = r.get("first_version", "")
+                age = r.get("age_years", "")
+                age_str = f" ({age} yrs old)" if age != "" else ""
+                first_v_str = f"  first version: {first_v}" if first_v else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age_str}{first_v_str}")
             if r.get("description"):
                 lines.append(f"    Description:      {r['description'][:80]}")
 
