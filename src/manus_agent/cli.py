@@ -1051,6 +1051,7 @@ _SUBCOMMANDS = {
     "variants",
     "epss-trend",
     "patch-diff",
+    "osv",
     "compare",
     "exploit-complexity",
     "poc-search",
@@ -1219,6 +1220,81 @@ def _run_patch_diff(argv: list[str]) -> int:
             print("  Reproduction hints:")
             for hint in s["reproduction_condition_hints"]:
                 print(f"    • {hint}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# osv subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_osv_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent osv",
+        description=(
+            "Resolve a CVE to its OSV.dev affected packages and version ranges.\n"
+            "OSV normalises ecosystem advisories (GHSA, PyPA, npm, Go, RustSec,\n"
+            "Maven) into concrete package + version-range tuples, giving exact\n"
+            "vulnerable ranges and first-fixed versions per package."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_osv(argv: list[str]) -> int:
+    parser = _build_osv_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_osv_data import fetch_osv_data
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    payload = fetch_osv_data(cve_id)
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    print(payload["message"])
+    if not payload.get("found"):
+        return 0
+
+    if payload.get("aliases"):
+        print(f"Aliases: {', '.join(payload['aliases'])}")
+
+    for rec in payload.get("records", []):
+        pkgs = rec.get("affected_packages", [])
+        if not pkgs:
+            continue
+        print(f"\nOSV record: {rec['osv_id']}")
+        for sev in rec.get("severity", []):
+            if sev.get("score"):
+                print(f"  Severity ({sev['type']}): {sev['score']}")
+        for p in pkgs:
+            loc = f"{p['ecosystem']}:{p['package']}"
+            fixed = ", ".join(p["fixed"]) if p["fixed"] else "(no fixed version listed)"
+            introduced = ", ".join(p["introduced"]) if p["introduced"] else "0"
+            print(f"  {loc}")
+            print(f"    Vulnerable from : {introduced}")
+            print(f"    First fixed     : {fixed}")
+            if p.get("last_affected"):
+                print(f"    Last affected   : {', '.join(p['last_affected'])}")
     return 0
 
 
@@ -2168,6 +2244,10 @@ def main() -> None:
     if first_positional == "patch-diff":
         idx = argv.index("patch-diff")
         sys.exit(_run_patch_diff(argv[idx + 1 :]))
+
+    if first_positional == "osv":
+        idx = argv.index("osv")
+        sys.exit(_run_osv(argv[idx + 1 :]))
 
     if first_positional == "compare":
         idx = argv.index("compare")
