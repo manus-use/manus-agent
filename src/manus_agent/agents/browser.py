@@ -1,11 +1,16 @@
 import asyncio
 
-from browser_use.agent.service import Agent
+try:
+    from browser_use.agent.service import Agent
 
-# from browser_use import Agent, ActionResult
-from browser_use.browser.browser import BrowserProfile, BrowserSession
-from browser_use.controller.service import Controller
-from browser_use.llm import ChatAnthropicBedrock
+    # from browser_use import Agent, ActionResult
+    from browser_use.browser.browser import BrowserProfile, BrowserSession
+    from browser_use.controller.service import Controller
+    from browser_use.llm import ChatAnthropicBedrock
+except ImportError as exc:  # pragma: no cover - optional dependency
+    raise ImportError(
+        "This module requires the optional 'browser' extra. Install it with: pip install 'manus-agent[browser]'"
+    ) from exc
 from pydantic import BaseModel, Field
 
 

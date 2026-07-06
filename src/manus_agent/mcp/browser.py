@@ -5,12 +5,18 @@ import logging
 import sys
 
 import requests
-from browser_use.agent.service import Agent
 
-# from browser_use import Agent, ActionResult
-from browser_use.browser.browser import BrowserProfile, BrowserSession
-from browser_use.controller.service import Controller
-from browser_use.llm import ChatAnthropicBedrock
+try:
+    from browser_use.agent.service import Agent
+
+    # from browser_use import Agent, ActionResult
+    from browser_use.browser.browser import BrowserProfile, BrowserSession
+    from browser_use.controller.service import Controller
+    from browser_use.llm import ChatAnthropicBedrock
+except ImportError as exc:  # pragma: no cover - optional dependency
+    raise ImportError(
+        "This module requires the optional 'browser' extra. Install it with: pip install 'manus-agent[browser]'"
+    ) from exc
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 

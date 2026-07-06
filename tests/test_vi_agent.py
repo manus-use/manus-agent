@@ -111,6 +111,28 @@ def test_run_analyze_calls_handle_request_with_cve():
     assert "CVE-2025-6554" in sent
 
 
+def test_handle_request_does_not_pass_timeout_kwarg_to_agent():
+    """``Agent.__call__`` has no ``timeout`` param; ensure we don't pass one.
+
+    Strands folds unknown kwargs into the deprecated event-loop
+    ``invocation_state`` and ignores them, so a ``timeout=`` kwarg here would
+    be a silent no-op. The real cap lives in ``GoalLoop(timeout=...)``.
+    """
+    from manus_agent.agents.vi_agent import VulnerabilityIntelligenceAgent
+
+    with mock.patch.object(VulnerabilityIntelligenceAgent, "__init__", return_value=None):
+        agent = VulnerabilityIntelligenceAgent()
+        agent.agent = mock.MagicMock(return_value="REPORT")
+        agent._local_chromium_browser = None
+
+        result = agent.handle_request("analyze CVE-2025-6554")
+
+    assert result == "REPORT"
+    agent.agent.assert_called_once()
+    assert "timeout" not in agent.agent.call_args.kwargs
+    assert agent.agent.call_args.args == ("analyze CVE-2025-6554",)
+
+
 # ---------------------------------------------------------------------------
 # Prompt <-> validator alignment (drift guard)
 # ---------------------------------------------------------------------------

@@ -290,7 +290,12 @@ class VulnerabilityIntelligenceAgent:
         cleaned up afterwards.
         """
         try:
-            return self.agent(request, timeout=600)
+            # NOTE: Strands ``Agent.__call__`` has no ``timeout`` parameter; any
+            # extra kwargs are folded into the (deprecated) event-loop
+            # ``invocation_state`` and silently ignored, so passing
+            # ``timeout=600`` here enforced nothing. The real wall-clock cap is
+            # applied by ``GoalLoop(timeout=900.0)`` in ``_build_agent``.
+            return self.agent(request)
         finally:
             cleanup = getattr(self._local_chromium_browser, "_cleanup", None)
             if callable(cleanup):
