@@ -109,3 +109,36 @@ def test_run_analyze_calls_handle_request_with_cve():
     assert m_handle.call_count == 1
     sent = m_handle.call_args.args[0]
     assert "CVE-2025-6554" in sent
+
+
+# ---------------------------------------------------------------------------
+# Prompt <-> validator alignment (drift guard)
+# ---------------------------------------------------------------------------
+
+
+class TestPromptValidatorAlignment:
+    """Guard against drift between the resource prompt and the report validator."""
+
+    def test_prompt_declares_every_required_section(self):
+        """Every validator-required section is declared as a `## <name>` header."""
+        from manus_agent.agents.vi_agent import (
+            _REQUIRED_REPORT_SECTIONS,
+            SYSTEM_PROMPT,
+        )
+
+        for section in _REQUIRED_REPORT_SECTIONS:
+            assert f"## {section}" in SYSTEM_PROMPT, section
+
+    def test_prompt_loaded_from_resource_is_nonempty(self):
+        """The prompt is loaded from the resource file with real content."""
+        from manus_agent.agents.vi_agent import SYSTEM_PROMPT
+
+        assert len(SYSTEM_PROMPT) > 500
+        assert "Phase 1" in SYSTEM_PROMPT
+
+    def test_prompt_has_no_mojibake(self):
+        """The clean resource file has no UTF-8-decoded-as-Latin-1 mojibake."""
+        from manus_agent.agents.vi_agent import SYSTEM_PROMPT
+
+        for corrupted in ("ð¨", "â ï¸", "â¦"):
+            assert corrupted not in SYSTEM_PROMPT, corrupted
