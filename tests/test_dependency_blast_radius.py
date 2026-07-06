@@ -18,6 +18,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_npm,
     _enrich_package,
     _enrich_pypi,
+    _extract_npm_first_release,
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
@@ -533,6 +534,201 @@ class TestEnrichNpm:
         with patch("requests.get", return_value=mock_resp):
             result = _enrich_npm("lodash")
         assert result.get("dependent_packages_count") == 100
+
+
+# ===========================================================================
+# _extract_npm_first_release
+# ===========================================================================
+
+
+class TestExtractNpmFirstRelease:
+    """Tests for the _extract_npm_first_release helper."""
+
+    def _time_dict(self, versions: dict[str, str]) -> dict[str, str]:
+        """Build a minimal npm time dict including created/modified noise."""
+        d = {
+            "created": "2010-01-01T00:00:00.000Z",
+            "modified": "2024-01-01T00:00:00.000Z",
+        }
+        d.update(versions)
+        return d
+
+    def test_returns_oldest_version(self):
+        time_dict = self._time_dict(
+            {
+                "0.1.0": "2012-06-03T10:00:00.000Z",
+                "1.0.0": "2015-03-15T10:00:00.000Z",
+                "4.17.21": "2021-02-02T10:00:00.000Z",
+            }
+        )
+        result = _extract_npm_first_release(time_dict)
+        assert result["first_version"] == "0.1.0"
+        assert result["first_release_date"] == "2012-06-03"
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 10
+
+    def test_skips_created_and_modified_keys(self):
+        # created/modified are very early; they must not be treated as versions
+        time_dict = {
+            "created": "2000-01-01T00:00:00.000Z",
+            "modified": "2001-01-01T00:00:00.000Z",
+            "1.0.0": "2018-05-20T12:00:00.000Z",
+        }
+        result = _extract_npm_first_release(time_dict)
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2018-05-20"
+
+    def test_returns_empty_dict_for_empty_input(self):
+        assert _extract_npm_first_release({}) == {}
+
+    def test_returns_empty_dict_when_only_special_keys(self):
+        time_dict = {"created": "2020-01-01T00:00:00.000Z", "modified": "2021-01-01T00:00:00.000Z"}
+        assert _extract_npm_first_release(time_dict) == {}
+
+    def test_handles_malformed_timestamp_gracefully(self):
+        time_dict = self._time_dict(
+            {
+                "1.0.0": "NOT-A-DATE",
+                "2.0.0": "2020-01-15T08:00:00.000Z",
+            }
+        )
+        result = _extract_npm_first_release(time_dict)
+        # Malformed entry skipped; valid one returned
+        assert result["first_version"] == "2.0.0"
+        assert result["first_release_date"] == "2020-01-15"
+
+    def test_handles_timestamp_without_microseconds(self):
+        time_dict = self._time_dict(
+            {
+                "0.5.0": "2013-07-04T14:30:00Z",
+            }
+        )
+        result = _extract_npm_first_release(time_dict)
+        assert result["first_release_date"] == "2013-07-04"
+
+    def test_handles_all_malformed_returns_empty(self):
+        time_dict = self._time_dict(
+            {
+                "1.0.0": "bad",
+                "2.0.0": "also-bad",
+            }
+        )
+        assert _extract_npm_first_release(time_dict) == {}
+
+    def test_age_years_is_reasonable(self):
+        time_dict = self._time_dict({"1.0.0": "2010-01-01T00:00:00.000Z"})
+        result = _extract_npm_first_release(time_dict)
+        # As of 2026, this package would be ~16 years old
+        assert result["age_years"] >= 14
+
+    def test_single_version_entry(self):
+        time_dict = {"1.0.0": "2019-11-11T11:11:11.111Z"}
+        result = _extract_npm_first_release(time_dict)
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2019-11-11"
+
+
+# ===========================================================================
+# _enrich_npm — registry call tests (first_release_date)
+# ===========================================================================
+
+
+class TestEnrichNpmFirstRelease:
+    """Tests for the registry HTTP call added to _enrich_npm."""
+
+    def _make_search_response(self, name: str, dependents: int = 1000, weekly: int = 5000000) -> dict:
+        return {
+            "objects": [
+                {
+                    "package": {"name": name},
+                    "dependents": str(dependents),
+                    "downloads": {"weekly": weekly, "monthly": weekly * 4},
+                }
+            ]
+        }
+
+    def _make_registry_response(self, name: str) -> dict:
+        return {
+            "name": name,
+            "time": {
+                "created": "2014-01-01T00:00:00.000Z",
+                "modified": "2024-06-01T00:00:00.000Z",
+                "0.1.0": "2014-01-15T10:00:00.000Z",
+                "1.0.0": "2015-06-01T10:00:00.000Z",
+                "4.17.21": "2021-02-02T10:00:00.000Z",
+            },
+        }
+
+    def test_first_release_date_included_in_result(self):
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response("lodash")
+        reg_resp = MagicMock()
+        reg_resp.json.return_value = self._make_registry_response("lodash")
+        with patch("requests.get", side_effect=[search_resp, reg_resp]):
+            result = _enrich_npm("lodash")
+        assert result["first_version"] == "0.1.0"
+        assert result["first_release_date"] == "2014-01-15"
+        assert isinstance(result["age_years"], float)
+
+    def test_graceful_degradation_when_registry_fails(self):
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response("axios")
+        with patch("requests.get", side_effect=[search_resp, Exception("503 Service Unavailable")]):
+            result = _enrich_npm("axios")
+        # Counts still returned; first_release_date absent but no crash
+        assert result["ecosystem"] == "npm"
+        assert "first_release_date" not in result
+        assert result["weekly_downloads"] == 5000000
+
+    def test_graceful_degradation_when_registry_returns_no_time_dict(self):
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_search_response("express")
+        reg_resp = MagicMock()
+        reg_resp.json.return_value = {"name": "express"}  # no 'time' key
+        with patch("requests.get", side_effect=[search_resp, reg_resp]):
+            result = _enrich_npm("express")
+        assert "first_release_date" not in result
+
+    def test_first_release_date_shown_in_output(self):
+        """Integration: first release date appears in the rendered text output."""
+        from unittest.mock import patch
+
+        # Build a minimal enriched result with first_release_date populated
+        npm_result = {
+            "ecosystem": "npm",
+            "package_name": "lodash",
+            "blast_radius": "HIGH",
+            "version_range": "<4.17.21",
+            "dependent_packages_count": 200000,
+            "weekly_downloads": 50000000,
+            "monthly_downloads": 200000000,
+            "first_version": "0.1.0",
+            "first_release_date": "2014-01-15",
+            "age_years": 12.5,
+            "source": "NVD",
+        }
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_npm",
+            return_value=npm_result,
+        ):
+            with patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected",
+                return_value=[{"name": "lodash", "ecosystem": "npm", "version_range": "<4.17.21"}],
+            ):
+                with patch(
+                    "manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected",
+                    return_value=[],
+                ):
+                    with patch(
+                        "manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected",
+                        return_value=[],
+                    ):
+                        output = get_dependency_blast_radius("CVE-2021-23337")
+
+        assert "First released:" in output
+        assert "2014-01-15" in output
+        assert "0.1.0" in output
 
 
 # ===========================================================================
