@@ -13,7 +13,8 @@ Data sources (all free, no API key required):
   4. npm registry API  — dependents count + weekly download stats (npm only)
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
-  6. Maven Central     — artifact metadata + version count (Maven only)
+  6. Maven Central     — artifact metadata + version count + first-release date
+                         (Maven only; age-of-library risk signal via GAV core)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -24,6 +25,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
@@ -51,6 +53,7 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_MAVEN_GAV_URL = "https://search.maven.org/solrsearch/select"  # same endpoint, GAV core
 
 _TIMEOUT = 20
 
@@ -348,15 +351,58 @@ def _enrich_pypi(name: str) -> dict[str, Any]:
     return result
 
 
+def _fetch_maven_first_release(group_id: str, artifact_id: str) -> dict[str, Any]:
+    """
+    Fetch the earliest-published version of a Maven artifact from Maven Central.
+
+    Uses the ``gav`` (group-artifact-version) core to retrieve per-version
+    timestamps, then returns the version with the smallest timestamp together
+    with a formatted date string and the library's age in years.
+
+    Returns a dict with keys ``first_version``, ``first_release_date``, and
+    ``age_years``, or an empty dict on failure / no data.
+    """
+    try:
+        query = f"g:{group_id} AND a:{artifact_id}"
+        # Fetch up to 200 versions — enough for any real artifact
+        data = _get(
+            _MAVEN_GAV_URL,
+            params={"q": query, "core": "gav", "rows": 200, "wt": "json"},
+        )
+        docs = data.get("response", {}).get("docs", [])
+        if not docs:
+            return {}
+        # Find the doc with the smallest timestamp
+        oldest = min(docs, key=lambda d: d.get("timestamp", float("inf")))
+        ts_ms = oldest.get("timestamp")
+        if ts_ms is None:
+            return {}
+        ts_s = int(ts_ms) // 1000
+        dt = datetime.datetime.fromtimestamp(ts_s, tz=datetime.timezone.utc)
+        age_days = (datetime.datetime.now(tz=datetime.timezone.utc) - dt).days
+        age_years = round(age_days / 365.25, 1)
+        return {
+            "first_version": oldest.get("v", ""),
+            "first_release_date": dt.strftime("%Y-%m-%d"),
+            "age_years": age_years,
+        }
+    except Exception as exc:
+        logger.debug("Maven first-release lookup failed for %s:%s: %s", group_id, artifact_id, exc)
+        return {}
+
+
 def _enrich_maven(name: str) -> dict[str, Any]:
-    """Fetch Maven Central artifact metadata."""
+    """Fetch Maven Central artifact metadata including first-release date."""
     result: dict[str, Any] = {"ecosystem": "Maven", "package_name": name}
+    group_id = ""
+    artifact_id = ""
     try:
         # Accept both 'groupId:artifactId' and plain 'artifactId' forms
         if ":" in name:
             g, a = name.split(":", 1)
             query = f"g:{g} AND a:{a}"
         else:
+            g, a = "", name
             query = f"a:{name}"
         data = _get(_MAVEN_SEARCH_URL, params={"q": query, "rows": 5, "wt": "json"})
         docs = data.get("response", {}).get("docs", [])
@@ -364,12 +410,20 @@ def _enrich_maven(name: str) -> dict[str, Any]:
             doc = docs[0]
             result["latest_version"] = doc.get("latestVersion", "")
             result["version_count"] = doc.get("versionCount", 0)
-            result["group_id"] = doc.get("g", "")
-            result["artifact_id"] = doc.get("a", "")
+            group_id = doc.get("g", g)
+            artifact_id = doc.get("a", a)
+            result["group_id"] = group_id
+            result["artifact_id"] = artifact_id
             result["full_id"] = doc.get("id", name)
         result["total_artifacts_found"] = data.get("response", {}).get("numFound", 0)
     except Exception as exc:
         logger.debug("Maven enrich failed for %s: %s", name, exc)
+
+    # Fetch first-release date when we have both group and artifact IDs
+    if group_id and artifact_id:
+        first = _fetch_maven_first_release(group_id, artifact_id)
+        result.update(first)
+
     return result
 
 
@@ -432,7 +486,8 @@ def get_dependency_blast_radius(  # noqa: C901
     2. For each affected package, fetches downstream exposure metrics:
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
-       - **Maven**: artifact metadata from Maven Central
+       - **Maven**: artifact metadata, version count, and first-release date
+         (age-of-library signal from Maven Central GAV index)
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -558,6 +613,11 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+            if r.get("first_release_date"):
+                age_str = f"  ({r['age_years']} yrs old)" if r.get("age_years") is not None else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age_str}")
+            if r.get("first_version"):
+                lines.append(f"    First version:    {r['first_version']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
