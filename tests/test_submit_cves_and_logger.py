@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -207,8 +205,9 @@ class TestSubmitCvesInputValidation:
 
 
 class TestSubmitCvesMissingUrl:
-    def test_no_url_raises_value_error(self, monkeypatch):
-        """When neither config nor env has a webhook URL, submit_cves raises ValueError."""
+    def test_no_url_returns_error_status(self, monkeypatch):
+        """When neither config nor env has a webhook URL, submit_cves returns an
+        error-status dict instead of raising ValueError to the caller."""
         monkeypatch.delenv("CVE_SUBMIT_URL", raising=False)
         with patch("manus_agent.tools.submit_cves.Config") as mock_config:
             cfg = MagicMock()
@@ -217,11 +216,11 @@ class TestSubmitCvesMissingUrl:
 
             from manus_agent.tools.submit_cves import submit_cves
 
-            with pytest.raises(ValueError, match="webhook URL"):
-                submit_cves(_make_tool_use())
+            result = submit_cves(_make_tool_use())
+            assert result["status"] == "error"
 
     def test_no_url_error_message_mentions_config_toml(self, monkeypatch):
-        """ValueError message should guide users to config.toml."""
+        """Error message should guide users to config.toml."""
         monkeypatch.delenv("CVE_SUBMIT_URL", raising=False)
         with patch("manus_agent.tools.submit_cves.Config") as mock_config:
             cfg = MagicMock()
@@ -230,8 +229,9 @@ class TestSubmitCvesMissingUrl:
 
             from manus_agent.tools.submit_cves import submit_cves
 
-            with pytest.raises(ValueError, match="config.toml"):
-                submit_cves(_make_tool_use())
+            result = submit_cves(_make_tool_use())
+            assert result["status"] == "error"
+            assert "config.toml" in result["content"][0]["text"]
 
 
 # ===========================================================================
