@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. crates.io API     — Rust crate metadata: all-time + recent downloads,
+                         reverse-dependency count, first release date (crates.io only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -24,6 +26,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
@@ -51,6 +54,9 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_CRATES_IO_CRATE_URL = "https://crates.io/api/v1/crates/{}"
+_CRATES_IO_RDEPS_URL = "https://crates.io/api/v1/crates/{}/reverse_dependencies"
+_CRATES_IO_USER_AGENT = "manus-agent/1.0 (https://github.com/manus-use/manus-agent)"
 
 _TIMEOUT = 20
 
@@ -373,6 +379,48 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _enrich_crates(name: str) -> dict[str, Any]:
+    """Fetch crates.io crate metadata: downloads, reverse-dep count, first release date."""
+    result: dict[str, Any] = {"ecosystem": "crates.io", "package_name": name}
+    headers = {"User-Agent": _CRATES_IO_USER_AGENT}
+    try:
+        crate_data = _get(_CRATES_IO_CRATE_URL.format(name), headers=headers)
+        crate = crate_data.get("crate", {})
+        if crate:
+            result["description"] = (crate.get("description") or "")[:120]
+            result["newest_version"] = crate.get("newest_version") or crate.get("max_version", "")
+            result["total_downloads"] = crate.get("downloads", 0)
+            result["recent_downloads"] = crate.get("recent_downloads", 0)
+            result["homepage"] = crate.get("homepage") or crate.get("repository") or ""
+            # created_at is the first-publish timestamp — same signal as first_release_date
+            created_at = crate.get("created_at", "")
+            if created_at:
+                try:
+                    # Strip trailing Z and parse ISO-8601
+                    ts_str = created_at.rstrip("Z").split("+")[0]
+                    if "." in ts_str:
+                        ts_str = ts_str[: ts_str.index(".") + 7]  # keep up to 6 decimal places
+                    dt = datetime.datetime.fromisoformat(ts_str).replace(tzinfo=datetime.timezone.utc)
+                    result["first_release_date"] = dt.strftime("%Y-%m-%d")
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    result["age_years"] = round((now_utc - dt).days / 365.25, 1)
+                except (ValueError, OverflowError):
+                    pass
+        # Reverse-dependency count (second call — graceful on failure)
+        try:
+            rdeps_data = _get(
+                _CRATES_IO_RDEPS_URL.format(name),
+                params={"per_page": 1},
+                headers=headers,
+            )
+            result["dependent_packages_count"] = rdeps_data.get("meta", {}).get("total", 0)
+        except Exception as exc:
+            logger.debug("crates.io reverse_dependencies failed for %s: %s", name, exc)
+    except Exception as exc:
+        logger.debug("crates.io enrich failed for %s: %s", name, exc)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +430,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("crates.io", "rust", "cargo"):
+        return _enrich_crates(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -395,9 +445,13 @@ def _blast_score(stats: dict[str, Any]) -> str:
     """
     Produce a qualitative blast-radius label based on download/dependent counts.
 
+    Uses ``weekly_downloads`` when available (npm, PyPI); falls back to
+    ``recent_downloads`` for ecosystems like crates.io that report
+    a recent-period total instead of a weekly figure.
+
     Returns one of: critical / high / medium / low / unknown
     """
-    weekly = stats.get("weekly_downloads") or 0
+    weekly = stats.get("weekly_downloads") or stats.get("recent_downloads") or 0
     dependents = stats.get("dependent_packages_count") or 0
 
     if weekly >= 5_000_000 or dependents >= 50_000:
@@ -433,6 +487,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **crates.io**: all-time + recent downloads, reverse-dep count, first release date
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -534,12 +589,13 @@ def get_dependency_blast_radius(  # noqa: C901
             lines.append(f"    Vulnerable range: {ver_range}")
 
         # npm-specific stats
-        if "dependent_packages_count" in r:
-            lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
-        if r.get("weekly_downloads") is not None:
-            lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
-        if r.get("monthly_downloads") is not None:
-            lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
+        if eco.lower() in ("npm", "javascript", "node"):
+            if "dependent_packages_count" in r:
+                lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
 
         # PyPI-specific stats
         if eco.lower() in ("pypi", "python"):
@@ -558,6 +614,22 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # crates.io-specific stats
+        if eco.lower() in ("crates.io", "rust", "cargo"):
+            if r.get("newest_version"):
+                lines.append(f"    Latest version:   {r['newest_version']}")
+            if "dependent_packages_count" in r:
+                lines.append(f"    Reverse deps:     {r['dependent_packages_count']:,}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    All-time DLs:     {r['total_downloads']:,}")
+            if r.get("recent_downloads") is not None:
+                lines.append(f"    Recent DLs:       {r['recent_downloads']:,}")
+            if r.get("first_release_date"):
+                age = f"  ({r['age_years']} yrs old)" if r.get("age_years") is not None else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
