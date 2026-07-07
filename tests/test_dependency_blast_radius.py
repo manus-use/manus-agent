@@ -2,7 +2,7 @@
 Tests for src/manus_agent/tools/get_dependency_blast_radius.py
 
 All external HTTP calls are mocked — no real network I/O.
-100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central.
+100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central, crates.io.
 """
 
 from __future__ import annotations
@@ -933,3 +933,342 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _enrich_crates
+# ===========================================================================
+
+
+def _make_crates_response(
+    name: str = "serde",
+    description: str = "A generic serialization/deserialization framework",
+    newest_version: str = "1.0.228",
+    downloads: int = 1_137_080_403,
+    recent_downloads: int = 226_277_234,
+    created_at: str = "2014-12-05T20:20:39.487502Z",
+    homepage: str = "https://serde.rs",
+) -> dict:
+    return {
+        "crate": {
+            "id": name,
+            "name": name,
+            "description": description,
+            "newest_version": newest_version,
+            "max_version": newest_version,
+            "downloads": downloads,
+            "recent_downloads": recent_downloads,
+            "created_at": created_at,
+            "homepage": homepage,
+            "repository": f"https://github.com/serde-rs/{name}",
+        }
+    }
+
+
+def _make_rdeps_response(total: int = 104_836) -> dict:
+    return {"versions": [], "meta": {"total": total}}
+
+
+class TestEnrichCrates:
+    def test_returns_full_metadata(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response()
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.status_code = 200
+        rdeps_resp.json.return_value = _make_rdeps_response(total=104_836)
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        assert result["ecosystem"] == "crates.io"
+        assert result["package_name"] == "serde"
+        assert result["newest_version"] == "1.0.228"
+        assert result["total_downloads"] == 1_137_080_403
+        assert result["recent_downloads"] == 226_277_234
+        assert result["dependent_packages_count"] == 104_836
+        assert result["description"] == "A generic serialization/deserialization framework"
+
+    def test_first_release_date_parsed(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response(created_at="2014-12-05T20:20:39.487502Z")
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.status_code = 200
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        assert result["first_release_date"] == "2014-12-05"
+        assert result["age_years"] >= 11.0  # serde is at least 11 years old
+
+    def test_first_release_date_no_microseconds(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response(created_at="2015-06-01T12:00:00Z")
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.status_code = 200
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("tokio")
+
+        assert result["first_release_date"] == "2015-06-01"
+
+    def test_graceful_degradation_on_main_call_error(self):
+        with patch("requests.get", side_effect=Exception("connection refused")):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        assert result["ecosystem"] == "crates.io"
+        assert result["package_name"] == "serde"
+        assert "total_downloads" not in result
+        assert "newest_version" not in result
+
+    def test_graceful_degradation_on_rdeps_error(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response()
+        crates_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, Exception("timeout")]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        # Main data should still be present
+        assert result["newest_version"] == "1.0.228"
+        assert result["total_downloads"] == 1_137_080_403
+        # But dependent_packages_count should be absent (graceful degradation)
+        assert "dependent_packages_count" not in result
+
+    def test_empty_crate_key_returns_minimal(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = {"crate": {}}
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.json.return_value = _make_rdeps_response(0)
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("unknown-crate")
+
+        assert result["ecosystem"] == "crates.io"
+
+    def test_malformed_created_at_skipped(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response(created_at="not-a-date")
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        # Bad date → no first_release_date key added
+        assert "first_release_date" not in result
+        assert "age_years" not in result
+
+    def test_empty_created_at_skipped(self):
+        crates_resp = MagicMock()
+        crates_resp.status_code = 200
+        crates_resp.json.return_value = _make_crates_response(created_at="")
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        assert "first_release_date" not in result
+
+    def test_homepage_falls_back_to_repository(self):
+        crate = _make_crates_response()
+        crate["crate"]["homepage"] = None
+        crate["crate"]["repository"] = "https://github.com/serde-rs/serde"
+
+        crates_resp = MagicMock()
+        crates_resp.json.return_value = crate
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("serde")
+
+        assert "github.com" in result.get("homepage", "")
+
+    def test_description_truncated_at_120(self):
+        long_desc = "A" * 200
+        crates_resp = MagicMock()
+        crates_resp.json.return_value = _make_crates_response(description=long_desc)
+        crates_resp.raise_for_status.return_value = None
+
+        rdeps_resp = MagicMock()
+        rdeps_resp.json.return_value = _make_rdeps_response()
+        rdeps_resp.raise_for_status.return_value = None
+
+        with patch("requests.get", side_effect=[crates_resp, rdeps_resp]):
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_crates
+
+            result = _enrich_crates("big-desc")
+
+        assert len(result["description"]) == 120
+
+
+# ===========================================================================
+# _enrich_package dispatch — crates.io
+# ===========================================================================
+
+
+class TestEnrichPackageDispatchCrates:
+    def test_crates_io_ecosystem(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_crates") as mock_crates:
+            mock_crates.return_value = {"ecosystem": "crates.io", "package_name": "serde"}
+            _enrich_package("serde", "crates.io")
+        mock_crates.assert_called_once_with("serde")
+
+    def test_rust_ecosystem_routes_to_crates(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_crates") as mock_crates:
+            mock_crates.return_value = {"ecosystem": "crates.io", "package_name": "tokio"}
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+            _enrich_package("tokio", "rust")
+        mock_crates.assert_called_once_with("tokio")
+
+    def test_cargo_ecosystem_routes_to_crates(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_crates") as mock_crates:
+            mock_crates.return_value = {"ecosystem": "crates.io", "package_name": "anyhow"}
+            from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+            _enrich_package("anyhow", "cargo")
+        mock_crates.assert_called_once_with("anyhow")
+
+
+# ===========================================================================
+# _blast_score — crates.io recent_downloads fallback
+# ===========================================================================
+
+
+class TestBlastScoreCratesIo:
+    def test_critical_via_recent_downloads(self):
+        assert _blast_score({"recent_downloads": 10_000_000}) == "CRITICAL"
+
+    def test_high_via_recent_downloads(self):
+        assert _blast_score({"recent_downloads": 1_000_000}) == "HIGH"
+
+    def test_medium_via_recent_downloads(self):
+        assert _blast_score({"recent_downloads": 100_000}) == "MEDIUM"
+
+    def test_low_via_recent_downloads(self):
+        assert _blast_score({"recent_downloads": 5_000}) == "LOW"
+
+    def test_weekly_takes_precedence_over_recent(self):
+        # weekly_downloads wins when both present
+        result = _blast_score({"weekly_downloads": 10_000_000, "recent_downloads": 1_000})
+        assert result == "CRITICAL"
+
+    def test_unknown_without_either(self):
+        assert _blast_score({"total_downloads": 5_000_000}) == "UNKNOWN"
+
+
+# ===========================================================================
+# Integration: crates.io package in full blast-radius output
+# ===========================================================================
+
+
+class TestGetBlastRadiusCratesIo:
+    def test_crates_package_spec_renders_output(self):
+        crates_stats = {
+            "ecosystem": "crates.io",
+            "package_name": "serde",
+            "newest_version": "1.0.228",
+            "total_downloads": 1_137_080_403,
+            "recent_downloads": 226_277_234,
+            "dependent_packages_count": 104_836,
+            "first_release_date": "2014-12-05",
+            "age_years": 11.6,
+            "description": "A generic serialization/deserialization framework",
+        }
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=crates_stats,
+        ):
+            result = get_dependency_blast_radius("crates.io:serde")
+
+        assert "serde" in result
+        assert "CRITICAL" in result
+        assert "1.0.228" in result
+        assert "2014-12-05" in result
+        assert "11.6" in result
+        assert "104,836" in result
+
+    def test_crates_cve_shows_crates_ecosystem(self):
+        pkgs = [
+            {
+                "name": "openssl",
+                "ecosystem": "crates.io",
+                "version_range": ">=0.10.0, <0.10.66",
+                "source": "osv",
+            }
+        ]
+        crates_stats = {
+            "ecosystem": "crates.io",
+            "package_name": "openssl",
+            "newest_version": "0.10.68",
+            "total_downloads": 250_000_000,
+            "recent_downloads": 35_000_000,
+            "dependent_packages_count": 12_500,
+            "first_release_date": "2015-01-15",
+            "age_years": 11.5,
+        }
+        with (
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected", return_value=pkgs),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=crates_stats,
+            ),
+        ):
+            result = get_dependency_blast_radius("CVE-2023-0286")
+
+        assert "openssl" in result
+        assert "crates.io" in result.lower() or "Rust" in result
+        assert "HIGH" in result or "CRITICAL" in result
