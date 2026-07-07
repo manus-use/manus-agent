@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. NuGet Search API  — total downloads, latest version, description (NuGet only)
+  8. NuGet Registration API — version history, first-release date (NuGet only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -51,6 +54,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_NUGET_SEARCH_URL = "https://azuresearch-usnc.nuget.org/query"
+_NUGET_REG_URL = "https://api.nuget.org/v3/registration5/{}/index.json"
 
 _TIMEOUT = 20
 
@@ -373,6 +378,90 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _extract_nuget_first_release(pages: list[dict]) -> dict[str, Any]:
+    """
+    Walk NuGet registration pages to find the earliest published date.
+
+    Each page item has a ``catalogEntry`` dict with a ``published`` field
+    (ISO 8601, e.g. ``"2015-03-20T00:00:00+00:00"`` or ``"2015-03-20T00:00:00Z"``).
+    We also collect ``totalVersions`` as a by-product.
+    """
+    earliest: datetime | None = None
+    total_versions = 0
+    for page in pages:
+        items = page.get("items", [])
+        total_versions += len(items)
+        for item in items:
+            entry = item.get("catalogEntry") or item
+            raw = entry.get("published", "")
+            if not raw:
+                continue
+            # Normalise: strip trailing Z, replace offset
+            raw = raw.strip()
+            if raw.endswith("Z"):
+                raw = raw[:-1] + "+00:00"
+            # Truncate sub-second fraction to 6 digits max
+            if "." in raw:
+                dot_pos = raw.index(".")
+                tz_pos = max(raw.find("+", dot_pos), raw.find("-", dot_pos))
+                if tz_pos == -1:
+                    frac = raw[dot_pos + 1 :]
+                    raw = raw[: dot_pos + 1] + frac[:6]
+                else:
+                    frac = raw[dot_pos + 1 : tz_pos]
+                    raw = raw[: dot_pos + 1] + frac[:6] + raw[tz_pos:]
+            try:
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if earliest is None or dt < earliest:
+                    earliest = dt
+            except ValueError:
+                continue
+    result: dict[str, Any] = {"total_versions": total_versions}
+    if earliest is not None:
+        result["first_release_date"] = earliest.strftime("%Y-%m-%d")
+        now = datetime.now(tz=timezone.utc)
+        age_years = (now - earliest).days / 365.25
+        result["age_years"] = round(age_years, 1)
+    return result
+
+
+def _enrich_nuget(name: str) -> dict[str, Any]:
+    """Fetch NuGet package metadata from the search and registration APIs."""
+    result: dict[str, Any] = {"ecosystem": "NuGet", "package_name": name}
+    try:
+        # Primary: NuGet Search API → total downloads, description, latest stable version
+        search_data = _get(
+            _NUGET_SEARCH_URL,
+            params={"q": name.lower(), "prerelease": "false", "take": 5},
+        )
+        for item in search_data.get("data", []):
+            if item.get("id", "").lower() == name.lower():
+                result["total_downloads"] = int(item.get("totalDownloads", 0))
+                result["latest_version"] = item.get("version", "")
+                desc = item.get("description", "")
+                if desc:
+                    result["description"] = desc[:120]
+                proj_url = item.get("projectUrl", "")
+                if proj_url:
+                    result["home_page"] = proj_url
+                break
+    except Exception as exc:
+        logger.debug("NuGet search failed for %s: %s", name, exc)
+
+    # Secondary: registration index → version history, first-release date
+    try:
+        reg_data = _get(_NUGET_REG_URL.format(name.lower()))
+        pages = reg_data.get("items", [])
+        date_info = _extract_nuget_first_release(pages)
+        result.update(date_info)
+    except Exception as exc:
+        logger.debug("NuGet registration fetch failed for %s: %s", name, exc)
+
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +471,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("nuget", ".net", "dotnet", "csharp", "c#"):
+        return _enrich_nuget(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -399,6 +490,12 @@ def _blast_score(stats: dict[str, Any]) -> str:
     """
     weekly = stats.get("weekly_downloads") or 0
     dependents = stats.get("dependent_packages_count") or 0
+
+    # NuGet reports all-time total_downloads; approximate weekly as total/age_weeks
+    if not weekly and stats.get("total_downloads"):
+        total = stats["total_downloads"]
+        age_years = stats.get("age_years") or 1.0
+        weekly = int(total / max(age_years * 52, 1))
 
     if weekly >= 5_000_000 or dependents >= 50_000:
         return "CRITICAL"
@@ -433,6 +530,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **NuGet**: total downloads, version count, first-release date
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -558,6 +656,22 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # NuGet-specific stats
+        if eco.lower() in ("nuget", ".net", "dotnet"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    All-time DLs:     {r['total_downloads']:,}")
+            if r.get("first_release_date"):
+                age = f" ({r['age_years']} yrs)" if r.get("age_years") is not None else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("home_page"):
+                lines.append(f"    Home page:        {r['home_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
