@@ -19,6 +19,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_package,
     _enrich_pypi,
     _fetch_ghsa_affected,
+    _fetch_maven_first_release,
     _fetch_nvd_affected,
     _fetch_osv_affected,
     _parse_input,
@@ -634,6 +635,157 @@ class TestEnrichMaven:
         with patch("requests.get", return_value=mock_resp):
             result = _enrich_maven("nonexistent-lib")
         assert result["total_artifacts_found"] == 0
+
+    def test_enrich_maven_includes_first_release_date_when_ids_found(self):
+        """_enrich_maven should call _fetch_maven_first_release when group+artifact resolved."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_maven_response("org.apache.logging.log4j", "log4j-core", "2.20.0")
+        first_release_data = {
+            "first_version": "2.0-alpha1",
+            "first_release_date": "2012-07-29",
+            "age_years": 12.0,
+        }
+        with patch("requests.get", return_value=search_resp):
+            with patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_maven_first_release",
+                return_value=first_release_data,
+            ) as mock_first:
+                result = _enrich_maven("org.apache.logging.log4j:log4j-core")
+        mock_first.assert_called_once_with("org.apache.logging.log4j", "log4j-core")
+        assert result["first_release_date"] == "2012-07-29"
+        assert result["first_version"] == "2.0-alpha1"
+        assert result["age_years"] == 12.0
+
+    def test_enrich_maven_no_first_release_when_no_group(self):
+        """_enrich_maven should NOT call _fetch_maven_first_release when search returns no docs."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"response": {"numFound": 0, "docs": []}}
+        with patch("requests.get", return_value=mock_resp):
+            with patch("manus_agent.tools.get_dependency_blast_radius._fetch_maven_first_release") as mock_first:
+                result = _enrich_maven("no-such-artifact")
+        mock_first.assert_not_called()
+        assert "first_release_date" not in result
+
+    def test_enrich_maven_first_release_failure_is_silent(self):
+        """If _fetch_maven_first_release fails, result still has core metadata."""
+        search_resp = MagicMock()
+        search_resp.json.return_value = self._make_maven_response("com.example", "mylib", "3.0.0")
+        with patch("requests.get", return_value=search_resp):
+            with patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_maven_first_release",
+                return_value={},
+            ):
+                result = _enrich_maven("com.example:mylib")
+        assert result["latest_version"] == "3.0.0"
+        assert "first_release_date" not in result
+
+
+# ===========================================================================
+# _fetch_maven_first_release
+# ===========================================================================
+
+
+class TestFetchMavenFirstRelease:
+    """Tests for _fetch_maven_first_release — all HTTP calls mocked."""
+
+    def _make_gav_response(self, docs: list[dict]) -> dict:
+        return {"response": {"numFound": len(docs), "docs": docs}}
+
+    def test_returns_oldest_version_by_timestamp(self):
+        # Three versions with different timestamps; 2012 entry is oldest
+        docs = [
+            {"v": "2.20.0", "g": "org.apache.logging.log4j", "a": "log4j-core", "timestamp": 1700000000000},
+            {"v": "2.0-alpha1", "g": "org.apache.logging.log4j", "a": "log4j-core", "timestamp": 1343589186000},
+            {"v": "2.14.1", "g": "org.apache.logging.log4j", "a": "log4j-core", "timestamp": 1630000000000},
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response(docs)
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("org.apache.logging.log4j", "log4j-core")
+        assert result["first_version"] == "2.0-alpha1"
+        # 2012-07-29 in UTC
+        assert result["first_release_date"] == "2012-07-29"
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 10  # log4j has been around > 10 years
+
+    def test_single_version_is_also_first(self):
+        docs = [
+            {"v": "1.0.0", "g": "com.example", "a": "mylib", "timestamp": 1500000000000},
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response(docs)
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("com.example", "mylib")
+        assert result["first_version"] == "1.0.0"
+        # 2017-07-14 in UTC
+        assert result["first_release_date"] == "2017-07-14"
+        assert result["age_years"] > 0
+
+    def test_empty_docs_returns_empty_dict(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response([])
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("com.example", "nonexistent")
+        assert result == {}
+
+    def test_doc_missing_timestamp_returns_empty_dict(self):
+        """Docs without a timestamp field should degrade gracefully."""
+        docs = [{"v": "1.0.0", "g": "com.example", "a": "mylib"}]  # no timestamp
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response(docs)
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("com.example", "mylib")
+        assert result == {}
+
+    def test_http_error_returns_empty_dict(self):
+        with patch("requests.get", side_effect=Exception("503 Service Unavailable")):
+            result = _fetch_maven_first_release("com.example", "mylib")
+        assert result == {}
+
+    def test_age_years_is_positive_float(self):
+        """age_years should be a positive float for any past timestamp."""
+        # Use a timestamp from year 2000
+        docs = [
+            {"v": "0.1", "g": "legacy", "a": "old-lib", "timestamp": 946684800000},  # 2000-01-01
+        ]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response(docs)
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("legacy", "old-lib")
+        assert result["age_years"] > 20
+        assert isinstance(result["age_years"], float)
+
+    def test_correct_query_is_sent_to_maven_api(self):
+        """Verify the correct query parameters are sent to Maven Central."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response([])
+        with patch("requests.get", return_value=mock_resp) as mock_get:
+            _fetch_maven_first_release("org.springframework", "spring-core")
+        call_kwargs = mock_get.call_args
+        params = call_kwargs[1].get("params", {}) if call_kwargs[1] else call_kwargs[0][1]
+        assert params["core"] == "gav"
+        assert params["rows"] == 200
+        assert "org.springframework" in params["q"]
+        assert "spring-core" in params["q"]
+
+    def test_multiple_docs_selects_minimum_timestamp(self):
+        """Even with many docs, the oldest timestamp wins."""
+        import random
+
+        rng = random.Random(42)
+        base_ts = 1343589186000  # 2012-07-29 — the expected minimum
+        docs = [
+            {"v": f"2.{i}.0", "g": "com.test", "a": "lib", "timestamp": base_ts + rng.randint(1, 10**12)}
+            for i in range(1, 50)
+        ]
+        docs.append({"v": "1.0.0", "g": "com.test", "a": "lib", "timestamp": base_ts})
+        rng.shuffle(docs)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_gav_response(docs)
+        with patch("requests.get", return_value=mock_resp):
+            result = _fetch_maven_first_release("com.test", "lib")
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2012-07-29"
 
 
 # ===========================================================================
