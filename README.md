@@ -26,15 +26,16 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [vendor-response](#manus-agent-vendor-response-cve-id--vendor-response-tracker)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
-  - [vendor-response](#manus-agent-vendor-response-cve-id--vendor-response-tracker)
   - [poc-freshness](#manus-agent-poc-freshness-cve-id--poc-freshness-checker)
   - [sbom-scan](#manus-agent-sbom-scan-bomfile--sbom-scanner)
   - [temporal-priority](#manus-agent-temporal-priority-cve-id--temporal-priority-scorer)
   - [cluster-variants](#manus-agent-cluster-variants-cve-id--cve-variant-clustering)
   - [changelog](#manus-agent-changelog--manage-project-changelog)
+- [Vulnerability Analysis Workflow](#vulnerability-analysis-workflow)
 - [Configuration](#configuration)
 - [Python API](#python-api)
 - [Security & Vulnerability Intelligence](#security--vulnerability-intelligence)
@@ -400,14 +401,21 @@ Walks NVD CPE configurations and cross-references PyPI / npm / Maven to produce 
 
 ```bash
 manus-agent vendor-response CVE-2024-3094
-manus-agent vendor-response CVE-2024-3094 --output json | jq .classification
+manus-agent vendor-response CVE-2024-3094 --output json | jq .vendor_response_state
 ```
 
-Queries four sources (NVD reference URL patterns, GHSA published state + patched_versions, CISA KEV required-action + due-date, repo-level GitHub security advisories) and outputs a 6-state patch-status classification:
+Queries NVD reference tags, CISA KEV required-action field, and VulnCheck KEV (when `VULNCHECK_API_KEY` is set) to classify the vendor's patch/response status into one of six states:
 
-`patch_available` · `patch_backported` · `wont_fix` · `investigating` · `no_patch` · `unknown`
+| State | Meaning |
+|-------|---------|
+| `patch_available` | A confirmed fix/patch has been released |
+| `patch_pending` | Vendor acknowledged; fix in progress or announced |
+| `workaround_only` | Vendor published a mitigation but no patch yet |
+| `investigating` | Vendor acknowledged but response status is unclear |
+| `no_patch_expected` | Vendor will not fix (EoL, won't-fix, or disputed) |
+| `unknown` | Insufficient data to classify |
 
-Confidence is rated `high / moderate / low`. A VulnCheck KEV hit upgrades confidence when `VULNCHECK_API_KEY` is set.
+Confidence is rated `high (≥0.9) / medium (≥0.6) / low (<0.6)`. A VulnCheck KEV hit upgrades confidence and can push state to `patch_available` or `investigating`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -491,6 +499,134 @@ Parses [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `f
 | `--version X.Y.Z` | — | Filter output to a specific release section |
 | `--generate` | off | Preview next release notes from commits since last tag |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+## Vulnerability Analysis Workflow
+
+The CLI tools form a layered analysis pipeline. Each tool answers one question;
+together they build a complete risk picture for any CVE.
+
+```
+Discover & Triage
+  └─ manus-agent discover              # find high-EPSS CVEs in your window
+  └─ manus-agent analyze <CVE>         # 8-step full intelligence report
+
+Exploitability
+  └─ manus-agent epss-trend <CVE>      # EPSS history + spike detection
+  └─ manus-agent exploit-complexity <CVE>  # attacker effort score (1–5)
+  └─ manus-agent poc-search <CVE>      # multi-source PoC aggregation
+
+Reach
+  └─ manus-agent blast-radius <CVE>    # downstream package/download stats
+  └─ manus-agent version-range <CVE>   # affected semver ranges
+  └─ manus-agent cluster-variants <CVE> # related CVEs by component/CWE/researcher
+
+Remediation
+  └─ manus-agent patch-diff <CVE>      # what changed in the fix commit
+  └─ manus-agent vendor-response <CVE> # patch_available / investigating / unknown
+  └─ manus-agent remediate <CVE>       # actionable fix guidance
+
+Situation awareness
+  └─ manus-agent compare <CVE-A> <CVE-B>  # side-by-side prioritisation
+  └─ manus-agent cve-timeline <CVE>    # disclosure → exploit → patch timeline
+  └─ manus-agent sbom-scan bom.json    # scan your dependency tree
+```
+
+### Worked example — CVE-2021-44228 (Log4Shell)
+
+This example walks through a complete analyst workflow using Log4Shell as the
+canonical fixture. Every command below exits 0 on a patched environment.
+
+**Step 1 — How exploitable is it?**
+
+```bash
+# EPSS is near 1.0 and has been since Dec 2021 — highest urgency
+$ manus-agent epss-trend CVE-2021-44228 --days 30
+EPSS Trend: CVE-2021-44228
+  Latest score : 0.9762 (97.6th percentile)
+  7-day spike  : ⚡ YES — jump of +0.02 detected
+
+# Trivial to exploit: AC=LOW, no auth, no user interaction
+$ manus-agent exploit-complexity CVE-2021-44228
+Exploit Complexity: CVE-2021-44228
+  Score: 1.4 / 5 — trivial
+  Attacker-friendly: yes
+```
+
+**Step 2 — How broadly does it spread?**
+
+```bash
+$ manus-agent blast-radius CVE-2021-44228
+Dependency Blast Radius — CVE-2021-44228
+  [1] log4j-core  (Maven)
+      Blast radius:     CRITICAL
+      Weekly downloads: 18,432,107
+      Vulnerable range: >=2.0.0, <2.16.0
+
+# Confirm patch is available for the specific version in use
+$ manus-agent vendor-response CVE-2021-44228
+Vendor Response: CVE-2021-44228
+  Status     : ✅ PATCH AVAILABLE
+  Confidence : high (0.95)
+  Signals:
+    NVD references  : 42
+    CISA KEV        : yes
+    VulnCheck KEV   : yes
+```
+
+**Step 3 — What exactly changed in the fix?**
+
+```bash
+$ manus-agent patch-diff CVE-2021-44228
+Patch Diff: CVE-2021-44228
+  Commit  : rel/2.17.1 (apache/logging-log4j2)
+  Bug class: remote_code_execution
+  Files changed: JndiLookup.java, Log4j2.xml (3 files total)
+  Key change: JNDI lookup disabled by default; allowlist added for permitted protocols
+```
+
+**Step 4 — Are there related CVEs you should track?**
+
+```bash
+# Log4Shell spawned a cluster: CVE-2021-45046, CVE-2021-45105, CVE-2021-44832
+$ manus-agent cluster-variants CVE-2021-44228
+Variant Clusters: CVE-2021-44228
+  Same component: CVE-2021-45046, CVE-2021-45105, CVE-2021-44832  (log4j2)
+  Same CWE-917: 8 CVEs with Improper Neutralization of JNDI
+```
+
+**Step 5 — Compare with another CVE to prioritise work**
+
+```bash
+$ manus-agent compare CVE-2021-44228 CVE-2024-3094
+Comparison: CVE-2021-44228 vs CVE-2024-3094
+  CVSS    : 10.0 vs 10.0        (tie)
+  EPSS    : 0.976 vs 0.781      → CVE-2021-44228 higher
+  KEV     : yes vs yes          (both actively exploited)
+  Higher priority: CVE-2021-44228 (strong confidence)
+  Reason: significantly higher EPSS; Log4Shell has broader blast radius
+```
+
+**JSON pipeline — feed tools into each other**
+
+```bash
+# Extract the highest blast-radius label, then only act if CRITICAL
+BLAST=$(manus-agent blast-radius CVE-2021-44228 --output json | jq -r '.summary.highest_blast_radius')
+if [ "$BLAST" = "CRITICAL" ]; then
+  manus-agent remediate CVE-2021-44228 --output json > remediation.json
+fi
+
+# Get vendor_response_state for a CI gate
+STATE=$(manus-agent vendor-response CVE-2021-44228 --output json | jq -r '.vendor_response_state')
+if [ "$STATE" != "patch_available" ]; then
+  echo "WARNING: no confirmed patch for CVE-2021-44228" && exit 1
+fi
+
+# Score exploit complexity and fail CI if attacker_friendly is true
+manus-agent exploit-complexity CVE-2021-44228 --output json \
+  | jq -e '.attacker_friendly == false'
+```
 
 ---
 

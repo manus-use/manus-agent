@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "vendor-response",
 }
 
 
@@ -1935,6 +1936,124 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# vendor-response subcommand
+# ---------------------------------------------------------------------------
+
+
+# State → human-readable label for text output.
+_VENDOR_STATE_LABEL = {
+    "patch_available": "✅ PATCH AVAILABLE",
+    "patch_pending": "🔄 PATCH PENDING",
+    "workaround_only": "⚠️  WORKAROUND ONLY",
+    "investigating": "🔍 INVESTIGATING",
+    "no_patch_expected": "❌ NO PATCH EXPECTED",
+    "unknown": "❓ UNKNOWN",
+}
+
+
+def _build_vendor_response_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent vendor-response",
+        description=(
+            "Track and classify the vendor patch/response status for a CVE.\n"
+            "Queries NVD, CISA KEV, and VulnCheck KEV (optional) to produce a\n"
+            "classification: patch_available, patch_pending, workaround_only,\n"
+            "investigating, no_patch_expected, or unknown."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier (e.g. CVE-2024-3094)")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_vendor_response(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+    import re as _re
+
+    parser = _build_vendor_response_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.track_vendor_response import (
+            _classify,
+            _fetch_cisa_kev,
+            _fetch_nvd_references,
+            _fetch_vulncheck_kev,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    import os as _os
+
+    api_key = _os.environ.get("VULNCHECK_API_KEY", "").strip()
+    cve_id_upper = cve_id.upper()
+
+    references = _fetch_nvd_references(cve_id_upper)
+    cisa_kev = _fetch_cisa_kev(cve_id_upper)
+    vulncheck_kev = _fetch_vulncheck_kev(cve_id_upper, api_key)
+    nvd_status = "analyzed" if references else "unknown"
+
+    state, confidence, evidence = _classify(references, cisa_kev, vulncheck_kev, nvd_status)
+
+    payload = {
+        "cve_id": cve_id_upper,
+        "vendor_response_state": state,
+        "confidence": confidence,
+        "evidence": evidence,
+        "signals": {
+            "nvd_references_found": len(references),
+            "cisa_kev_hit": bool(cisa_kev),
+            "vulncheck_kev_hit": bool(vulncheck_kev),
+            "vulncheck_api_key_present": bool(api_key),
+        },
+    }
+
+    if args.output == "json":
+        print(_json.dumps(payload, indent=2))
+        return 0
+
+    # ---- text output --------------------------------------------------------
+    conf_label = "high" if confidence >= 0.9 else "medium" if confidence >= 0.6 else "low"
+    state_label = _VENDOR_STATE_LABEL.get(state, state.upper())
+
+    print()
+    print(f"Vendor Response: {cve_id_upper}")
+    print("=" * 60)
+    print(f"  Status       : {state_label}")
+    print(f"  Confidence   : {conf_label} ({confidence:.2f})")
+    print()
+
+    sigs = payload["signals"]
+    print("  Signals:")
+    print(f"    NVD references  : {sigs['nvd_references_found']}")
+    print(f"    CISA KEV        : {'yes' if sigs['cisa_kev_hit'] else 'no'}")
+    vc_note = (
+        "yes" if sigs["vulncheck_kev_hit"] else ("no (no API key)" if not sigs["vulncheck_api_key_present"] else "no")
+    )
+    print(f"    VulnCheck KEV   : {vc_note}")
+    print()
+
+    if evidence:
+        print("  Evidence:")
+        for e in evidence:
+            print(f"    - {e}")
+        print()
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2387,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "vendor-response":
+        idx = argv.index("vendor-response")
+        sys.exit(_run_vendor_response(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
