@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. RubyGems API      — gem metadata + all-time/recent downloads + first-release
+                         date (RubyGems only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -24,6 +26,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
@@ -51,6 +54,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_RUBYGEMS_GEM_URL = "https://rubygems.org/api/v1/gems/{}.json"
+_RUBYGEMS_VERSIONS_URL = "https://rubygems.org/api/v1/versions/{}.json"
 
 _TIMEOUT = 20
 
@@ -373,6 +378,84 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _extract_rubygems_first_release(versions: list[dict]) -> dict[str, Any]:
+    """Parse RubyGems version list and return first-release metadata.
+
+    Each entry has ``created_at`` (ISO 8601, e.g. ``2010-04-28T21:23:00.000Z``).
+    Returns ``{first_version, first_release_date, age_years}`` or ``{}`` on failure.
+    """
+    if not versions:
+        return {}
+    best_date: datetime.datetime | None = None
+    best_version = ""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for entry in versions:
+        created_raw = entry.get("created_at", "")
+        if not created_raw:
+            continue
+        try:
+            # Normalise: strip trailing Z / milliseconds / offset variants
+            ts = created_raw
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            # Truncate sub-second to ≤6 digits
+            if "." in ts:
+                dot = ts.index(".")
+                end = ts.index("+", dot) if "+" in ts[dot:] else len(ts)
+                frac = ts[dot + 1 : end]
+                ts = ts[: dot + 1] + frac[:6] + ts[end:]
+            dt = datetime.datetime.fromisoformat(ts)
+            dt = dt.astimezone(datetime.timezone.utc)
+        except (ValueError, OverflowError):
+            continue
+        if best_date is None or dt < best_date:
+            best_date = dt
+            best_version = entry.get("number", "")
+    if best_date is None:
+        return {}
+    age_years = round((now - best_date).days / 365.25, 1)
+    return {
+        "first_version": best_version,
+        "first_release_date": best_date.strftime("%Y-%m-%d"),
+        "age_years": age_years,
+    }
+
+
+def _enrich_rubygems(name: str) -> dict[str, Any]:
+    """Fetch RubyGems gem metadata + download stats + first-release date.
+
+    Two calls:
+    1. ``/api/v1/gems/{name}.json`` — downloads, version, description, homepage.
+    2. ``/api/v1/versions/{name}.json`` — version history for first-release date
+       (isolated try/except; failure does not affect main metadata).
+    """
+    result: dict[str, Any] = {"ecosystem": "RubyGems", "package_name": name}
+    try:
+        gem = _get(_RUBYGEMS_GEM_URL.format(name))
+        result["total_downloads"] = gem.get("downloads", 0)
+        result["recent_downloads"] = gem.get("version_downloads", 0)  # current-version DLs
+        result["latest_version"] = gem.get("version", "")
+        description = gem.get("info", "") or ""
+        result["description"] = description[:120]
+        result["home_page"] = gem.get("homepage_uri") or gem.get("project_uri", "")
+        # Use total_downloads as the primary blast-score signal
+        result["weekly_downloads"] = None  # RubyGems does not expose weekly; use total below
+    except Exception as exc:
+        logger.debug("RubyGems gem fetch failed for %s: %s", name, exc)
+        return result
+
+    # Second call: version list for first-release date
+    try:
+        versions = _get(_RUBYGEMS_VERSIONS_URL.format(name))
+        if isinstance(versions, list):
+            release_meta = _extract_rubygems_first_release(versions)
+            result.update(release_meta)
+    except Exception as exc:
+        logger.debug("RubyGems versions fetch failed for %s: %s", name, exc)
+
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +465,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("rubygems", "ruby", "gem"):
+        return _enrich_rubygems(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -398,6 +483,12 @@ def _blast_score(stats: dict[str, Any]) -> str:
     Returns one of: critical / high / medium / low / unknown
     """
     weekly = stats.get("weekly_downloads") or 0
+    # RubyGems exposes all-time total_downloads instead of weekly; use it as fallback
+    if not weekly and stats.get("total_downloads"):
+        # Rough weekly proxy: total / (age_years * 52) floored at 1 week
+        total = stats["total_downloads"]
+        age_years = stats.get("age_years") or 1.0
+        weekly = int(total / max(age_years * 52, 1))
     dependents = stats.get("dependent_packages_count") or 0
 
     if weekly >= 5_000_000 or dependents >= 50_000:
@@ -433,6 +524,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **RubyGems**: gem metadata + all-time/current-version downloads + first-release date
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -558,6 +650,23 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # RubyGems-specific stats
+        if eco.lower() in ("rubygems", "ruby", "gem"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    All-time DLs:     {r['total_downloads']:,}")
+            if r.get("recent_downloads") is not None:
+                lines.append(f"    Current ver DLs:  {r['recent_downloads']:,}")
+            if r.get("first_release_date"):
+                lines.append(
+                    f"    First released:   {r['first_release_date']} "
+                    f"({r.get('age_years', '?')} yrs old)"
+                    + (f"  first version: {r['first_version']}" if r.get("first_version") else "")
+                )
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
 
         if source:
             lines.append(f"    Data sources:     {source}")

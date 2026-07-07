@@ -18,6 +18,8 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_npm,
     _enrich_package,
     _enrich_pypi,
+    _enrich_rubygems,
+    _extract_rubygems_first_release,
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
@@ -933,3 +935,242 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _extract_rubygems_first_release
+# ===========================================================================
+
+
+class TestExtractRubygemsFirstRelease:
+    def _make_version(self, number: str, created_at: str) -> dict:
+        return {"number": number, "created_at": created_at}
+
+    def test_returns_oldest_version(self):
+        versions = [
+            self._make_version("2.0.0", "2020-06-01T00:00:00.000Z"),
+            self._make_version("1.0.0", "2014-03-15T12:34:56.000Z"),
+            self._make_version("1.5.0", "2017-09-22T08:00:00.000Z"),
+        ]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2014-03-15"
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 5
+
+    def test_empty_list_returns_empty_dict(self):
+        assert _extract_rubygems_first_release([]) == {}
+
+    def test_malformed_timestamps_skipped(self):
+        versions = [
+            self._make_version("1.0.0", "not-a-date"),
+            self._make_version("2.0.0", "also-bad"),
+        ]
+        assert _extract_rubygems_first_release(versions) == {}
+
+    def test_mixed_valid_and_invalid_timestamps(self):
+        versions = [
+            self._make_version("1.0.0", "bad-date"),
+            self._make_version("2.0.0", "2019-05-10T00:00:00.000Z"),
+        ]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_version"] == "2.0.0"
+        assert result["first_release_date"] == "2019-05-10"
+
+    def test_single_version(self):
+        versions = [self._make_version("0.1.0", "2012-01-01T00:00:00.000Z")]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_version"] == "0.1.0"
+        assert result["first_release_date"] == "2012-01-01"
+
+    def test_handles_no_milliseconds(self):
+        """ISO 8601 without sub-second fraction."""
+        versions = [self._make_version("1.0.0", "2015-07-04T10:30:00Z")]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_release_date"] == "2015-07-04"
+
+    def test_handles_utc_offset(self):
+        """ISO 8601 with explicit +00:00 offset."""
+        versions = [self._make_version("1.0.0", "2016-11-11T00:00:00.000+00:00")]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_release_date"] == "2016-11-11"
+
+    def test_missing_created_at_skipped(self):
+        versions = [
+            {"number": "1.0.0"},  # no created_at key
+            self._make_version("2.0.0", "2021-08-20T00:00:00.000Z"),
+        ]
+        result = _extract_rubygems_first_release(versions)
+        assert result["first_version"] == "2.0.0"
+
+
+# ===========================================================================
+# _enrich_rubygems
+# ===========================================================================
+
+
+class TestEnrichRubygems:
+    def _make_gem_response(self, name: str, version: str, downloads: int, version_downloads: int) -> dict:
+        return {
+            "name": name,
+            "version": version,
+            "downloads": downloads,
+            "version_downloads": version_downloads,
+            "info": f"{name} is a Ruby library for doing things",
+            "homepage_uri": f"https://github.com/example/{name}",
+            "project_uri": f"https://rubygems.org/gems/{name}",
+        }
+
+    def _make_versions_response(self) -> list[dict]:
+        return [
+            {"number": "2.0.0", "created_at": "2020-04-01T00:00:00.000Z"},
+            {"number": "1.0.0", "created_at": "2010-09-15T00:00:00.000Z"},
+            {"number": "1.5.0", "created_at": "2015-06-10T00:00:00.000Z"},
+        ]
+
+    def test_returns_gem_metadata_and_first_release(self):
+        gem_resp = MagicMock()
+        gem_resp.raise_for_status.return_value = None
+        gem_resp.json.return_value = self._make_gem_response("nokogiri", "1.16.0", 50_000_000, 3_000_000)
+        ver_resp = MagicMock()
+        ver_resp.raise_for_status.return_value = None
+        ver_resp.json.return_value = self._make_versions_response()
+        with patch("requests.get", side_effect=[gem_resp, ver_resp]):
+            result = _enrich_rubygems("nokogiri")
+        assert result["ecosystem"] == "RubyGems"
+        assert result["package_name"] == "nokogiri"
+        assert result["total_downloads"] == 50_000_000
+        assert result["recent_downloads"] == 3_000_000
+        assert result["latest_version"] == "1.16.0"
+        assert "nokogiri" in result["description"]
+        assert result["first_version"] == "1.0.0"
+        assert result["first_release_date"] == "2010-09-15"
+        assert result["age_years"] > 5
+
+    def test_versions_failure_does_not_break_main_metadata(self):
+        gem_resp = MagicMock()
+        gem_resp.raise_for_status.return_value = None
+        gem_resp.json.return_value = self._make_gem_response("rails", "7.1.0", 200_000_000, 1_000_000)
+        with patch("requests.get", side_effect=[gem_resp, Exception("versions endpoint 503")]):
+            result = _enrich_rubygems("rails")
+        assert result["total_downloads"] == 200_000_000
+        assert result["latest_version"] == "7.1.0"
+        # first_release_date should be absent (versions call failed)
+        assert "first_release_date" not in result
+
+    def test_graceful_degradation_on_gem_fetch_error(self):
+        with patch("requests.get", side_effect=Exception("connection refused")):
+            result = _enrich_rubygems("sinatra")
+        assert result["ecosystem"] == "RubyGems"
+        assert result["package_name"] == "sinatra"
+        assert "total_downloads" not in result
+
+    def test_homepage_uri_preferred_over_project_uri(self):
+        gem_resp = MagicMock()
+        gem_resp.raise_for_status.return_value = None
+        gem = self._make_gem_response("devise", "4.9.0", 10_000_000, 500_000)
+        gem["homepage_uri"] = "https://github.com/heartcombo/devise"
+        gem_resp.json.return_value = gem
+        ver_resp = MagicMock()
+        ver_resp.raise_for_status.return_value = None
+        ver_resp.json.return_value = []
+        with patch("requests.get", side_effect=[gem_resp, ver_resp]):
+            result = _enrich_rubygems("devise")
+        assert result["home_page"] == "https://github.com/heartcombo/devise"
+
+    def test_description_truncated_to_120_chars(self):
+        gem_resp = MagicMock()
+        gem_resp.raise_for_status.return_value = None
+        gem = self._make_gem_response("capybara", "3.39.2", 80_000_000, 2_000_000)
+        gem["info"] = "x" * 200
+        gem_resp.json.return_value = gem
+        ver_resp = MagicMock()
+        ver_resp.raise_for_status.return_value = None
+        ver_resp.json.return_value = []
+        with patch("requests.get", side_effect=[gem_resp, ver_resp]):
+            result = _enrich_rubygems("capybara")
+        assert len(result["description"]) <= 120
+
+
+# ===========================================================================
+# _enrich_package dispatch (RubyGems)
+# ===========================================================================
+
+
+class TestEnrichPackageDispatchRubyGems:
+    def test_rubygems_ecosystem(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_rubygems") as mock_rb:
+            mock_rb.return_value = {"ecosystem": "RubyGems", "package_name": "rack"}
+            _enrich_package("rack", "RubyGems")
+        mock_rb.assert_called_once_with("rack")
+
+    def test_ruby_ecosystem_routes_to_rubygems(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_rubygems") as mock_rb:
+            mock_rb.return_value = {"ecosystem": "RubyGems", "package_name": "sinatra"}
+            _enrich_package("sinatra", "ruby")
+        mock_rb.assert_called_once_with("sinatra")
+
+    def test_gem_ecosystem_routes_to_rubygems(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_rubygems") as mock_rb:
+            mock_rb.return_value = {"ecosystem": "RubyGems", "package_name": "puma"}
+            _enrich_package("puma", "gem")
+        mock_rb.assert_called_once_with("puma")
+
+
+# ===========================================================================
+# _blast_score with RubyGems total_downloads fallback
+# ===========================================================================
+
+
+class TestBlastScoreRubyGemsFallback:
+    def test_critical_from_total_downloads_large_gem(self):
+        # rails has hundreds of millions of downloads; age ~14 years
+        # avg weekly = 200_000_000 / (14 * 52) ≈ 274_725 -> MEDIUM/HIGH
+        stats = {"total_downloads": 200_000_000, "age_years": 14.0, "weekly_downloads": None}
+        score = _blast_score(stats)
+        assert score in ("MEDIUM", "HIGH", "CRITICAL")  # large gem should rank above LOW
+
+    def test_low_from_small_gem_total_downloads(self):
+        # tiny gem, 5000 total downloads, 3 years old -> avg weekly ≈ 32 -> LOW
+        stats = {"total_downloads": 5_000, "age_years": 3.0, "weekly_downloads": None}
+        score = _blast_score(stats)
+        assert score in ("LOW", "MEDIUM", "UNKNOWN")
+
+    def test_explicit_weekly_takes_precedence(self):
+        # If weekly_downloads is set it should not be overridden
+        stats = {"weekly_downloads": 6_000_000, "total_downloads": 1_000, "age_years": 0.1}
+        score = _blast_score(stats)
+        assert score == "CRITICAL"
+
+
+# ===========================================================================
+# Integration: full blast-radius output includes RubyGems block
+# ===========================================================================
+
+
+class TestBlastRadiusRubyGemsOutput:
+    def test_rubygems_block_in_output(self):
+        """Direct package spec: rubygems:rack@2.2.6 should emit RubyGems block."""
+        gem_resp = MagicMock()
+        gem_resp.raise_for_status.return_value = None
+        gem_resp.json.return_value = {
+            "name": "rack",
+            "version": "3.0.8",
+            "downloads": 500_000_000,
+            "version_downloads": 10_000_000,
+            "info": "A modular Ruby web server interface",
+            "homepage_uri": "https://rack.github.io",
+        }
+        ver_resp = MagicMock()
+        ver_resp.raise_for_status.return_value = None
+        ver_resp.json.return_value = [
+            {"number": "0.1.0", "created_at": "2007-05-16T00:00:00.000Z"},
+            {"number": "3.0.8", "created_at": "2023-11-01T00:00:00.000Z"},
+        ]
+        with patch("requests.get", side_effect=[gem_resp, ver_resp]):
+            output = get_dependency_blast_radius("rubygems:rack@2.2.6")
+        assert "RubyGems" in output
+        assert "All-time DLs" in output
+        assert "500,000,000" in output
+        assert "First released" in output
+        assert "2007-05-16" in output
