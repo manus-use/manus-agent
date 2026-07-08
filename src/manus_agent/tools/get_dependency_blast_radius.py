@@ -10,7 +10,7 @@ Data sources (all free, no API key required):
   2. OSV.dev API       — cross-ecosystem vulnerability data (PyPI, npm, Maven,
                          Go, RubyGems, crates.io, …)
   3. GitHub Advisory DB — GHSA packages + ecosystems
-  4. npm registry API  — dependents count + weekly download stats (npm only)
+  4. npm registry API  — dependents count + weekly download stats + first release date (npm only)
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
@@ -24,6 +24,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 from typing import Any
@@ -48,6 +49,7 @@ _OSV_VULN_URL = "https://api.osv.dev/v1/vulns/{}"
 _GHSA_URL = "https://api.github.com/advisories"
 _NPM_SEARCH_URL = "https://registry.npmjs.org/-/v1/search"
 _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
+_NPM_REGISTRY_URL = "https://registry.npmjs.org/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
@@ -301,8 +303,57 @@ def _fetch_ghsa_affected(cve_id: str) -> list[dict[str, str]]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_npm_first_release(time_dict: dict[str, str]) -> dict[str, Any]:
+    """Return first_version/first_release_date/age_years from the npm registry ``time`` dict.
+
+    The ``time`` dict maps version strings to ISO-8601 timestamps.  Two special
+    keys (``created`` and ``modified``) are not version identifiers and must be
+    skipped.  We find the version with the oldest timestamp and return:
+
+    .. code-block:: python
+
+        {
+            "first_version":      "0.1.0",
+            "first_release_date": "2012-06-03",
+            "age_years":          12.1,
+        }
+
+    Returns an empty dict on any error (missing keys, malformed timestamps, …).
+    """
+    _skip = {"created", "modified"}
+    earliest_ts: datetime.datetime | None = None
+    earliest_ver: str = ""
+
+    for ver, ts_str in time_dict.items():
+        if ver in _skip:
+            continue
+        try:
+            # npm timestamps are like "2012-06-03T15:33:30.215Z"
+            ts_clean = ts_str.rstrip("Z").split("+")[0]
+            # Handle optional microseconds
+            fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in ts_clean else "%Y-%m-%dT%H:%M:%S"
+            naive = datetime.datetime.strptime(ts_clean, fmt)
+            ts = naive.replace(tzinfo=datetime.timezone.utc)
+        except (ValueError, AttributeError):
+            continue
+        if earliest_ts is None or ts < earliest_ts:
+            earliest_ts = ts
+            earliest_ver = ver
+
+    if earliest_ts is None:
+        return {}
+
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    age_years = round((now - earliest_ts).days / 365.25, 1)
+    return {
+        "first_version": earliest_ver,
+        "first_release_date": earliest_ts.strftime("%Y-%m-%d"),
+        "age_years": age_years,
+    }
+
+
 def _enrich_npm(name: str) -> dict[str, Any]:
-    """Fetch npm dependent count + weekly downloads."""
+    """Fetch npm dependent count, weekly downloads, and first release date."""
     result: dict[str, Any] = {"ecosystem": "npm", "package_name": name}
     try:
         # Search returns dependents count
@@ -320,6 +371,16 @@ def _enrich_npm(name: str) -> dict[str, Any]:
             result["weekly_downloads"] = dl_data.get("downloads", 0)
     except Exception as exc:
         logger.debug("npm enrich failed for %s: %s", name, exc)
+
+    # Second call: npm registry for version timestamps → first release date
+    try:
+        reg_data = _get(_NPM_REGISTRY_URL.format(name))
+        time_dict = reg_data.get("time", {})
+        first_info = _extract_npm_first_release(time_dict)
+        result.update(first_info)
+    except Exception as exc:
+        logger.debug("npm registry call failed for %s: %s", name, exc)
+
     return result
 
 
@@ -430,7 +491,7 @@ def get_dependency_blast_radius(  # noqa: C901
     1. Identifies the affected package(s) and version range(s) from NVD,
        OSV.dev, and the GitHub Advisory Database.
     2. For each affected package, fetches downstream exposure metrics:
-       - **npm**: dependent package count + weekly/monthly download stats
+       - **npm**: dependent package count + weekly/monthly download stats + first release date / age
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
@@ -540,6 +601,12 @@ def get_dependency_blast_radius(  # noqa: C901
             lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
         if r.get("monthly_downloads") is not None:
             lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
+        if eco.lower() in ("npm", "javascript", "node"):
+            if r.get("first_release_date"):
+                lines.append(
+                    f"    First released:   {r['first_release_date']}"
+                    f" ({r['age_years']} yrs old)  first version: {r.get('first_version', '')}"
+                )
 
         # PyPI-specific stats
         if eco.lower() in ("pypi", "python"):
