@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "assess",
 }
 
 
@@ -2198,6 +2199,73 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# assess subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_assess_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent assess",
+        description=(
+            "Produce a unified vulnerability triage card for a CVE.\n"
+            "Aggregates NVD CVSS, EPSS trend, CISA KEV status, dependency\n"
+            "blast-radius, exploit complexity, and PoC existence in a single\n"
+            "call — giving an instant P0–P3 priority verdict."
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=("Examples:\n  manus-agent assess CVE-2021-44228\n  manus-agent assess CVE-2024-3094 --output json\n"),
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier to triage (e.g. CVE-2021-44228)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_assess(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+    import re as _re
+
+    parser = _build_assess_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        import manus_agent.tools.get_vulnerability_triage as _triage_mod
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    console.print(f"[bold blue]Assessing {cve_id.upper()}[/bold blue]")
+
+    try:
+        with console.status(f"Gathering triage signals for {cve_id.upper()}\u2026", spinner="dots"):
+            triage = _triage_mod._run_triage(cve_id)
+    except Exception as exc:
+        print(f"Error: triage failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        # Remove non-serialisable internals (none currently, but guard anyway)
+        print(_json.dumps(triage, indent=2, default=str))
+        return 0
+
+    print(_triage_mod._render_text(triage))
+    return 0
+
+
 def main() -> None:
     """Main CLI entry point."""
     argv = sys.argv[1:]
@@ -2268,6 +2336,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "assess":
+        idx = argv.index("assess")
+        sys.exit(_run_assess(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
