@@ -14,6 +14,7 @@ import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
     _blast_score,
+    _enrich_go,
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
@@ -21,6 +22,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _parse_go_timestamp,
     _parse_input,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
@@ -672,10 +674,178 @@ class TestEnrichPackageDispatch:
             _enrich_package("log4j-core", "Maven")
         mock_maven.assert_called_once_with("log4j-core")
 
+    def test_go_ecosystem(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_go") as mock_go:
+            mock_go.return_value = {"ecosystem": "Go", "package_name": "golang.org/x/net"}
+            _enrich_package("golang.org/x/net", "Go")
+        mock_go.assert_called_once_with("golang.org/x/net")
+
+    def test_golang_alias_routes_to_go(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_go") as mock_go:
+            mock_go.return_value = {"ecosystem": "Go", "package_name": "github.com/gin-gonic/gin"}
+            _enrich_package("github.com/gin-gonic/gin", "golang")
+        mock_go.assert_called_once_with("github.com/gin-gonic/gin")
+
     def test_unknown_ecosystem_returns_minimal_record(self):
         result = _enrich_package("unknown-pkg", "SomeExoticEcosystem")
         assert result["ecosystem"] == "SomeExoticEcosystem"
         assert result["package_name"] == "unknown-pkg"
+
+
+# ===========================================================================
+# _parse_go_timestamp
+# ===========================================================================
+
+
+class TestParseGoTimestamp:
+    def test_parses_z_suffix(self):
+        dt = _parse_go_timestamp("2022-10-19T15:28:41Z")
+        assert dt is not None
+        assert dt.year == 2022
+        assert dt.month == 10
+        assert dt.day == 19
+
+    def test_parses_utc_offset(self):
+        dt = _parse_go_timestamp("2020-01-15T00:00:00+00:00")
+        assert dt is not None
+        assert dt.year == 2020
+
+    def test_parses_naive_datetime(self):
+        dt = _parse_go_timestamp("2018-03-04T12:30:00")
+        assert dt is not None
+        assert dt.year == 2018
+
+    def test_parses_with_microseconds(self):
+        dt = _parse_go_timestamp("2021-06-01T08:00:00.123456Z")
+        assert dt is not None
+        assert dt.year == 2021
+
+    def test_parses_with_fractional_seconds_truncated(self):
+        # .NET-style 7-digit ticks should be truncated to 6
+        dt = _parse_go_timestamp("2019-11-11T10:10:10.1234567Z")
+        assert dt is not None
+        assert dt.year == 2019
+
+    def test_empty_string_returns_none(self):
+        assert _parse_go_timestamp("") is None
+
+    def test_invalid_returns_none(self):
+        assert _parse_go_timestamp("not-a-date") is None
+
+
+# ===========================================================================
+# _enrich_go
+# ===========================================================================
+
+
+class TestEnrichGo:
+    def _proxy_latest(self, version: str, time: str) -> dict:
+        return {"Version": version, "Time": time}
+
+    def _deps_dev_response(self, versions: list[dict]) -> dict:
+        return {
+            "packageKey": {"system": "GO", "name": "golang.org/x/net"},
+            "versions": versions,
+        }
+
+    def _make_version_entry(self, version: str, published_at: str, is_default: bool = False) -> dict:
+        return {
+            "versionKey": {"system": "GO", "name": "golang.org/x/net", "version": version},
+            "publishedAt": published_at,
+            "isDefault": is_default,
+        }
+
+    def test_returns_latest_version_and_dates(self):
+        proxy_resp = MagicMock()
+        proxy_resp.json.return_value = self._proxy_latest("v0.20.0", "2024-03-05T14:00:00Z")
+        deps_versions = [
+            self._make_version_entry("v0.1.0", "2022-10-19T15:28:41Z"),
+            self._make_version_entry("v0.20.0", "2024-03-05T14:00:00Z", is_default=True),
+        ]
+        deps_resp = MagicMock()
+        deps_resp.json.return_value = self._deps_dev_response(deps_versions)
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]):
+            result = _enrich_go("golang.org/x/net")
+        assert result["ecosystem"] == "Go"
+        assert result["package_name"] == "golang.org/x/net"
+        assert result["latest_version"] == "v0.20.0"
+        assert result["latest_release_date"] == "2024-03-05"
+        assert result["first_release_date"] == "2022-10-19"
+        assert result["total_versions"] == 2
+        assert result["age_years"] > 0
+
+    def test_url_encodes_module_path(self):
+        """Slashes in module path must be percent-encoded in the API URL."""
+        proxy_resp = MagicMock()
+        proxy_resp.json.return_value = self._proxy_latest("v1.9.4", "2023-11-01T00:00:00Z")
+        deps_resp = MagicMock()
+        deps_resp.json.return_value = self._deps_dev_response([])
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]) as mock_get:
+            _enrich_go("github.com/gorilla/mux")
+        # First call is Go proxy; second is deps.dev — both must not contain raw slashes in the path segment
+        first_url = mock_get.call_args_list[0][0][0]
+        assert "github.com%2Fgorilla%2Fmux" in first_url or "github.com/gorilla/mux" not in first_url.split(
+            "proxy.golang.org/", 1
+        )[-1].split("/@latest")[0].replace("%2F", "/").replace("/", "")
+
+    def test_proxy_failure_still_returns_deps_data(self):
+        """If Go proxy fails, we still get version info from deps.dev."""
+        proxy_resp = MagicMock()
+        proxy_resp.raise_for_status.side_effect = Exception("503 Service Unavailable")
+        deps_versions = [self._make_version_entry("v1.0.0", "2020-05-01T00:00:00Z")]
+        deps_resp = MagicMock()
+        deps_resp.json.return_value = self._deps_dev_response(deps_versions)
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]):
+            result = _enrich_go("github.com/gorilla/mux")
+        assert result["ecosystem"] == "Go"
+        assert result["first_release_date"] == "2020-05-01"
+        assert "latest_version" not in result
+
+    def test_deps_dev_failure_still_returns_proxy_data(self):
+        """If deps.dev fails, we still get latest version from proxy."""
+        proxy_resp = MagicMock()
+        proxy_resp.json.return_value = self._proxy_latest("v1.5.0", "2023-01-15T00:00:00Z")
+        deps_resp = MagicMock()
+        deps_resp.raise_for_status.side_effect = Exception("429 Too Many Requests")
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]):
+            result = _enrich_go("golang.org/x/crypto")
+        assert result["latest_version"] == "v1.5.0"
+        assert result["latest_release_date"] == "2023-01-15"
+        assert "total_versions" not in result
+
+    def test_both_calls_fail_returns_minimal_record(self):
+        with patch("requests.get", side_effect=Exception("network error")):
+            result = _enrich_go("golang.org/x/sys")
+        assert result["ecosystem"] == "Go"
+        assert result["package_name"] == "golang.org/x/sys"
+        assert "latest_version" not in result
+        assert "first_release_date" not in result
+
+    def test_empty_versions_list_no_crash(self):
+        proxy_resp = MagicMock()
+        proxy_resp.json.return_value = self._proxy_latest("v0.1.0", "2023-06-01T00:00:00Z")
+        deps_resp = MagicMock()
+        deps_resp.json.return_value = self._deps_dev_response([])
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]):
+            result = _enrich_go("github.com/some/newmodule")
+        assert result["total_versions"] == 0
+        assert "first_release_date" not in result
+        assert "age_years" not in result
+
+    def test_versions_missing_publishedat_skipped(self):
+        """Versions without publishedAt timestamps are skipped gracefully."""
+        proxy_resp = MagicMock()
+        proxy_resp.json.return_value = self._proxy_latest("v2.0.0", "2024-01-01T00:00:00Z")
+        deps_versions = [
+            {"versionKey": {"version": "v1.0.0"}, "publishedAt": ""},
+            self._make_version_entry("v2.0.0", "2024-01-01T00:00:00Z"),
+        ]
+        deps_resp = MagicMock()
+        deps_resp.json.return_value = self._deps_dev_response(deps_versions)
+        with patch("requests.get", side_effect=[proxy_resp, deps_resp]):
+            result = _enrich_go("github.com/example/lib")
+        # Only v2.0.0 contributes a valid timestamp; first == latest
+        assert result["first_release_date"] == "2024-01-01"
 
 
 # ===========================================================================
@@ -886,6 +1056,33 @@ class TestGetDependencyBlastRadius:
         ):
             result = get_dependency_blast_radius("CVE-2023-32681")
         assert "Python" in result or "PyPI" in result
+
+    def test_go_package_output_shows_version_and_dates(self):
+        """Go enrichment fields appear correctly in rendered output."""
+        pkgs = [{"name": "golang.org/x/net", "ecosystem": "Go", "version_range": "< 0.17.0", "source": "osv"}]
+        go_stats = {
+            "ecosystem": "Go",
+            "package_name": "golang.org/x/net",
+            "latest_version": "v0.20.0",
+            "latest_release_date": "2024-03-05",
+            "first_release_date": "2022-10-19",
+            "age_years": 1.4,
+            "total_versions": 42,
+        }
+        with (
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected", return_value=pkgs),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=go_stats,
+            ),
+        ):
+            result = get_dependency_blast_radius("CVE-2023-44487")
+        assert "golang.org/x/net" in result
+        assert "v0.20.0" in result
+        assert "2022-10-19" in result
+        assert "42" in result
 
 
 # ===========================================================================

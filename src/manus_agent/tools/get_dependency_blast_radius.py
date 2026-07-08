@@ -14,6 +14,9 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Go module proxy   — latest version + release timestamp (Go only)
+  8. deps.dev API      — cross-ecosystem version history + first-release date
+                         (Go, crates.io, and others)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -26,6 +29,8 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -51,6 +56,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_GO_PROXY_LATEST_URL = "https://proxy.golang.org/{}/@latest"
+_DEPS_DEV_PKG_URL = "https://api.deps.dev/v3alpha/systems/GO/packages/{}"
 
 _TIMEOUT = 20
 
@@ -373,6 +380,66 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _parse_go_timestamp(ts: str) -> datetime | None:
+    """Parse a Go module proxy / deps.dev ISO-8601 timestamp robustly."""
+    if not ts:
+        return None
+    # Strip trailing Z or +00:00 offset
+    ts = ts.rstrip("Z")
+    if ts.endswith("+00:00"):
+        ts = ts[:-6]
+    # Truncate sub-second part to 6 digits (Python limit)
+    dot = ts.find(".")
+    if dot != -1:
+        ts = ts[: dot + 7]  # keep at most 6 fractional digits
+    try:
+        return datetime.fromisoformat(ts).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _enrich_go(name: str) -> dict[str, Any]:
+    """Fetch Go module metadata from the Go module proxy and deps.dev."""
+    result: dict[str, Any] = {"ecosystem": "Go", "package_name": name}
+    # URL-encode the module path for both APIs (slashes → %2F)
+    encoded = urllib.parse.quote(name, safe="")
+
+    # --- Call 1: Go module proxy @latest (latest version + timestamp) ---
+    try:
+        proxy_data = _get(_GO_PROXY_LATEST_URL.format(encoded))
+        result["latest_version"] = proxy_data.get("Version", "")
+        ts = proxy_data.get("Time", "")
+        if ts:
+            dt = _parse_go_timestamp(ts)
+            if dt:
+                result["latest_release_date"] = dt.strftime("%Y-%m-%d")
+    except Exception as exc:
+        logger.debug("Go proxy latest failed for %s: %s", name, exc)
+
+    # --- Call 2: deps.dev package endpoint (version list + first release) ---
+    try:
+        deps_data = _get(_DEPS_DEV_PKG_URL.format(encoded))
+        versions = deps_data.get("versions", [])
+        result["total_versions"] = len(versions)
+
+        # Extract first-release date from the earliest publishedAt timestamp
+        timestamps: list[datetime] = []
+        for v in versions:
+            dt = _parse_go_timestamp(v.get("publishedAt", ""))
+            if dt:
+                timestamps.append(dt)
+        if timestamps:
+            first_dt = min(timestamps)
+            result["first_release_date"] = first_dt.strftime("%Y-%m-%d")
+            now = datetime.now(tz=timezone.utc)
+            age_years = (now - first_dt).days / 365.25
+            result["age_years"] = round(age_years, 1)
+    except Exception as exc:
+        logger.debug("deps.dev enrich failed for %s: %s", name, exc)
+
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +449,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("go", "golang"):
+        return _enrich_go(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -433,6 +502,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **Go**: latest version + release date + version history (via Go module proxy and deps.dev)
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -558,6 +628,18 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Go-specific stats
+        if eco.lower() in ("go", "golang"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("first_release_date"):
+                age = f"  ({r['age_years']} yrs old)" if r.get("age_years") else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age}")
+            if r.get("latest_release_date"):
+                lines.append(f"    Latest release:   {r['latest_release_date']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
