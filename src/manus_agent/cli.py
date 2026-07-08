@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "report",
 }
 
 
@@ -1935,6 +1936,87 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# report subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_report_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent report",
+        description=(
+            "Generate a comprehensive Markdown narrative report for a CVE.\n"
+            "Aggregates NVD, EPSS, CISA KEV, OSV, and GitHub Advisory data in\n"
+            "parallel and produces a structured report with sections:\n"
+            "  Summary · Technical Details · Affected Packages ·\n"
+            "  Exploitation Status · Recommendations · References"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  manus-agent report CVE-2021-44228\n"
+            "  manus-agent report CVE-2024-3094 --output json\n"
+            "  manus-agent report CVE-2021-44228 --save report.md\n"
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--output",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Output format: markdown (default) or json",
+    )
+    p.add_argument(
+        "--save",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="Save the report to FILE (e.g. report.md or report.json)",
+    )
+    return p
+
+
+def _run_report(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+    import re as _re
+
+    parser = _build_report_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.generate_cve_report import generate_cve_report
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: failed to import generate_cve_report: {exc}", file=sys.stderr)
+        return 1
+
+    result = generate_cve_report(cve_id)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    output_text: str
+    if args.output == "json":
+        output_text = _json.dumps(result, indent=2)
+        print(output_text)
+    else:
+        output_text = result.get("markdown", "")
+        print(output_text)
+
+    if args.save:
+        save_path: Path = args.save
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(output_text, encoding="utf-8")
+        print(f"\nReport saved to: {save_path}", file=sys.stderr)
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2350,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "report":
+        idx = argv.index("report")
+        sys.exit(_run_report(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")

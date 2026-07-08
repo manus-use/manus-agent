@@ -112,6 +112,7 @@ class VulnerabilityIntelligenceAgent:
             from strands import Agent
             from strands_tools import current_time
 
+            from manus_agent.tools.generate_cve_report import generate_cve_report
             from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
             from manus_agent.tools.get_epss_trend import get_epss_trend
             from manus_agent.tools.get_github_advisory import get_github_advisory
@@ -178,6 +179,7 @@ class VulnerabilityIntelligenceAgent:
             get_vulncheck_data,
             search_poc_sources,
             get_dependency_blast_radius,
+            generate_cve_report,
         ]
         if use_browser is not None:
             tools.append(use_browser)
