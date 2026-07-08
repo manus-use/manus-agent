@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "diff-report",
 }
 
 
@@ -1935,6 +1936,120 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# diff-report subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_diff_report_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent diff-report",
+        description=(
+            "Generate a rich Markdown diff-report comparing two CVEs side-by-side.\n"
+            "Covers CVSS delta, EPSS divergence, CISA KEV status, CWE classes,\n"
+            "and a scored prioritisation verdict with full rationale.\n\n"
+            "Examples:\n"
+            "  manus-agent diff-report CVE-2021-44228 CVE-2021-45046\n"
+            "  manus-agent diff-report CVE-2024-3094 CVE-2023-44487 --output json\n"
+            "  manus-agent diff-report CVE-2024-3094 CVE-2023-44487 --save report.md"
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("cve_id_a", metavar="CVE-ID-A", help="First CVE (e.g. CVE-2021-44228)")
+    p.add_argument("cve_id_b", metavar="CVE-ID-B", help="Second CVE to compare against")
+    p.add_argument(
+        "--output",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="Report format (default: markdown)",
+    )
+    p.add_argument(
+        "--save",
+        metavar="FILE",
+        default=None,
+        help="Save report to FILE instead of printing to stdout",
+    )
+    return p
+
+
+def _run_diff_report(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+    import re as _re
+
+    parser = _build_diff_report_parser()
+    args = parser.parse_args(argv)
+
+    cve_id_a: str = args.cve_id_a.strip()
+    cve_id_b: str = args.cve_id_b.strip()
+
+    _cve_re = _re.compile(r"^CVE-\d{4}-\d+$", _re.IGNORECASE)
+    for cid in (cve_id_a, cve_id_b):
+        if not _cve_re.match(cid):
+            parser.error(f"Invalid CVE ID '{cid}'. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.diff_report_cves import (
+            _build_diff_report,
+            _build_profile,
+            _fetch_kev,
+            _render_markdown,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    import concurrent.futures as _cf
+
+    # When emitting JSON to stdout, route progress messages to stderr so the
+    # raw JSON can be piped directly without interference.
+    from rich.console import Console as _Console
+
+    _progress_console = _Console(stderr=True) if args.output == "json" else console
+
+    _progress_console.print(
+        f"[bold blue]Generating diff-report:[/bold blue] "
+        f"[cyan]{cve_id_a.upper()}[/cyan] vs [cyan]{cve_id_b.upper()}[/cyan]"
+    )
+
+    try:
+        with _progress_console.status("Fetching CVE data from NVD, EPSS, and CISA KEV...", spinner="dots"):
+            with _cf.ThreadPoolExecutor(max_workers=4) as ex:
+                f_a = ex.submit(_build_profile, cve_id_a)
+                f_b = ex.submit(_build_profile, cve_id_b)
+                f_kev_a = ex.submit(_fetch_kev, cve_id_a)
+                f_kev_b = ex.submit(_fetch_kev, cve_id_b)
+                profile_a = f_a.result()
+                profile_b = f_b.result()
+                kev_a = f_kev_a.result()
+                kev_b = f_kev_b.result()
+    except Exception as exc:
+        _progress_console.print(f"[red]\u2717 Data fetch failed: {exc}[/red]")
+        return 1
+
+    report = _build_diff_report(profile_a, profile_b, kev_a, kev_b)
+
+    if args.output == "json":
+        output_text = _json.dumps(report, indent=2)
+    else:
+        output_text = _render_markdown(report)
+
+    if args.save:
+        try:
+            Path(args.save).write_text(output_text, encoding="utf-8")
+            _progress_console.print(f"[green]\u2713 Report saved to [bold]{args.save}[/bold][/green]")
+        except OSError as exc:
+            _progress_console.print(f"[red]\u2717 Failed to save report: {exc}[/red]")
+            return 1
+    else:
+        if args.output == "json":
+            sys.stdout.write(output_text + "\n")
+        else:
+            console.print(output_text)
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2383,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "diff-report":
+        idx = argv.index("diff-report")
+        sys.exit(_run_diff_report(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
