@@ -2,7 +2,7 @@
 Tests for src/manus_agent/tools/get_dependency_blast_radius.py
 
 All external HTTP calls are mocked — no real network I/O.
-100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central.
+100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central, Hex.pm.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
     _blast_score,
+    _enrich_hex,
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
@@ -21,6 +22,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _parse_hex_timestamp,
     _parse_input,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
@@ -637,6 +639,223 @@ class TestEnrichMaven:
 
 
 # ===========================================================================
+# _parse_hex_timestamp
+# ===========================================================================
+
+
+class TestParseHexTimestamp:
+    def test_utc_z_suffix(self):
+        # Typical Hex.pm timestamp with microseconds and Z suffix
+        iso_date, age = _parse_hex_timestamp("2014-04-21T22:38:32.000000Z")
+        assert iso_date == "2014-04-21"
+        assert age is not None
+        assert age > 0
+
+    def test_no_microseconds(self):
+        iso_date, age = _parse_hex_timestamp("2020-01-15T10:00:00Z")
+        assert iso_date == "2020-01-15"
+        assert age is not None
+
+    def test_high_precision_microseconds(self):
+        # Hex sometimes returns 6 fractional digits
+        iso_date, age = _parse_hex_timestamp("2022-06-30T12:34:56.123456Z")
+        assert iso_date == "2022-06-30"
+
+    def test_with_offset(self):
+        # +00:00 offset instead of Z
+        iso_date, age = _parse_hex_timestamp("2019-03-10T08:00:00.000000+00:00")
+        assert iso_date == "2019-03-10"
+        assert age is not None
+
+    def test_none_input(self):
+        iso_date, age = _parse_hex_timestamp(None)
+        assert iso_date is None
+        assert age is None
+
+    def test_empty_string(self):
+        iso_date, age = _parse_hex_timestamp("")
+        assert iso_date is None
+        assert age is None
+
+    def test_invalid_input(self):
+        iso_date, age = _parse_hex_timestamp("not-a-date")
+        assert iso_date is None
+        assert age is None
+
+
+# ===========================================================================
+# _enrich_hex
+# ===========================================================================
+
+
+class TestEnrichHex:
+    """Tests for _enrich_hex — all HTTP calls mocked."""
+
+    def _make_hex_response(
+        self,
+        name: str = "phoenix",
+        latest_stable: str = "1.8.9",
+        weekly: int = 288733,
+        total: int = 151660295,
+        recent: int = 3422170,
+        description: str = "A productive web framework.",
+        html_url: str = "https://hex.pm/packages/phoenix",
+        releases: list | None = None,
+    ) -> dict:
+        if releases is None:
+            releases = [
+                {"version": "1.8.9", "inserted_at": "2026-07-07T12:23:21.396353Z", "has_docs": True},
+                {"version": "1.0.0", "inserted_at": "2016-01-01T00:00:00.000000Z", "has_docs": True},
+                {"version": "0.1.0", "inserted_at": "2014-04-21T22:38:32.000000Z", "has_docs": False},
+            ]
+        return {
+            "name": name,
+            "latest_stable_version": latest_stable,
+            "downloads": {"all": total, "week": weekly, "recent": recent, "day": 55963},
+            "meta": {"description": description, "licenses": ["MIT"]},
+            "html_url": html_url,
+            "releases": releases,
+            "inserted_at": "2014-04-21T22:38:32.000000Z",
+        }
+
+    def test_basic_fields_populated(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["ecosystem"] == "Hex"
+        assert result["package_name"] == "phoenix"
+        assert result["latest_version"] == "1.8.9"
+        assert result["total_versions"] == 3
+
+    def test_download_stats(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(weekly=288733, total=151660295, recent=3422170)
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["weekly_downloads"] == 288733
+        assert result["total_downloads"] == 151660295
+        assert result["recent_downloads"] == 3422170
+
+    def test_first_release_date_extracted(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        # Oldest release is releases[-1] = 0.1.0 from 2014-04-21
+        assert result["first_release_date"] == "2014-04-21"
+        assert result["age_years"] is not None
+        assert result["age_years"] > 0
+
+    def test_description_truncated_to_120_chars(self):
+        long_desc = "A" * 200
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(description=long_desc)
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert len(result["description"]) == 120
+
+    def test_description_newlines_replaced(self):
+        desc = "Line one.\nLine two.\nLine three."
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(description=desc)
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert "\n" not in result["description"]
+
+    def test_home_page_set(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(html_url="https://hex.pm/packages/phoenix")
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["home_page"] == "https://hex.pm/packages/phoenix"
+
+    def test_graceful_degradation_on_network_error(self):
+        with patch("requests.get", side_effect=Exception("Connection refused")):
+            result = _enrich_hex("phoenix")
+        assert result["ecosystem"] == "Hex"
+        assert result["package_name"] == "phoenix"
+        # No crash; no extra fields expected
+        assert "weekly_downloads" not in result
+
+    def test_missing_downloads_key_does_not_crash(self):
+        data = self._make_hex_response()
+        del data["downloads"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = data
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["ecosystem"] == "Hex"
+        assert "weekly_downloads" not in result
+
+    def test_missing_releases_key(self):
+        data = self._make_hex_response()
+        del data["releases"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = data
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["total_versions"] == 0
+        assert "first_release_date" not in result
+
+    def test_empty_releases_list(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(releases=[])
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        assert result["total_versions"] == 0
+        assert "first_release_date" not in result
+
+    def test_blast_score_critical_for_popular_package(self):
+        # phoenix has 288k weekly downloads → HIGH (not CRITICAL)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(weekly=5_000_000)
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("ecto")
+        # _blast_score uses weekly_downloads
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score
+
+        assert _blast_score(result) == "CRITICAL"
+
+    def test_blast_score_high_for_phoenix(self):
+        # phoenix has ~288k weekly downloads -> MEDIUM (HIGH threshold is 500k)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(weekly=288733)
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score
+
+        assert _blast_score(result) == "MEDIUM"
+
+    def test_latest_stable_version_preferred_over_latest_version(self):
+        data = self._make_hex_response(latest_stable="1.8.9")
+        data["latest_version"] = "2.0.0-rc.1"  # pre-release overrides latest
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = data
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("phoenix")
+        # latest_stable_version should win
+        assert result["latest_version"] == "1.8.9"
+
+    def test_fallback_to_latest_version_when_stable_absent(self):
+        data = self._make_hex_response()
+        data["latest_stable_version"] = None
+        data["latest_version"] = "0.9.0-beta"
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = data
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("some_pkg")
+        assert result["latest_version"] == "0.9.0-beta"
+
+    def test_package_name_preserved(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_hex_response(name="ecto")
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_hex("ecto")
+        assert result["package_name"] == "ecto"
+
+
+# ===========================================================================
 # _enrich_package dispatch
 # ===========================================================================
 
@@ -671,6 +890,24 @@ class TestEnrichPackageDispatch:
             mock_maven.return_value = {"ecosystem": "Maven", "package_name": "log4j-core"}
             _enrich_package("log4j-core", "Maven")
         mock_maven.assert_called_once_with("log4j-core")
+
+    def test_hex_ecosystem(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_hex") as mock_hex:
+            mock_hex.return_value = {"ecosystem": "Hex", "package_name": "phoenix"}
+            _enrich_package("phoenix", "Hex")
+        mock_hex.assert_called_once_with("phoenix")
+
+    def test_elixir_ecosystem_routes_to_hex(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_hex") as mock_hex:
+            mock_hex.return_value = {"ecosystem": "Hex", "package_name": "ecto"}
+            _enrich_package("ecto", "elixir")
+        mock_hex.assert_called_once_with("ecto")
+
+    def test_erlang_ecosystem_routes_to_hex(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_hex") as mock_hex:
+            mock_hex.return_value = {"ecosystem": "Hex", "package_name": "ranch"}
+            _enrich_package("ranch", "erlang")
+        mock_hex.assert_called_once_with("ranch")
 
     def test_unknown_ecosystem_returns_minimal_record(self):
         result = _enrich_package("unknown-pkg", "SomeExoticEcosystem")
