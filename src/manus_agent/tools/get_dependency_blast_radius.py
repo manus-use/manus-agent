@@ -14,6 +14,7 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Hex.pm API        — package metadata + download stats (Elixir/Erlang)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +52,7 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_HEX_API_URL = "https://hex.pm/api/packages/{}"
 
 _TIMEOUT = 20
 
@@ -64,7 +66,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "RubyGems": "RubyGems (Ruby)",
     "NuGet": "NuGet (.NET)",
     "Packagist": "Packagist (PHP)",
-    "Hex": "Hex (Elixir/Erlang)",
+    "Hex": "Hex (Elixir/Erlang)",  # noqa: E241  (alignment)
     "Pub": "Pub (Dart/Flutter)",
 }
 
@@ -373,6 +375,98 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _parse_hex_timestamp(ts: str | None) -> tuple[str | None, float | None]:
+    """Parse a Hex inserted_at ISO-8601 timestamp.
+
+    Hex always returns timestamps in the form ``YYYY-MM-DDTHH:MM:SS.ffffffZ``
+    (UTC, variable sub-second precision).  Returns ``(iso_date, age_years)``
+    where *iso_date* is the ``YYYY-MM-DD`` string and *age_years* is a float
+    rounded to two decimal places.  Both are ``None`` when parsing fails.
+    """
+    if not ts:
+        return None, None
+    try:
+        from datetime import datetime, timezone
+
+        # Normalise: strip trailing Z, truncate sub-seconds to 6 digits
+        ts_clean = ts.rstrip("Z")
+        if "+" in ts_clean:
+            ts_clean = ts_clean.split("+")[0]
+        if "." in ts_clean:
+            date_part, frac = ts_clean.split(".", 1)
+            ts_clean = date_part + "." + frac[:6]
+        dt = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        age = round((now - dt).days / 365.25, 2)
+        return dt.date().isoformat(), age
+    except Exception:
+        return None, None
+
+
+def _enrich_hex(name: str) -> dict[str, Any]:
+    """Fetch Hex.pm package metadata for Elixir/Erlang packages.
+
+    Single API call to ``https://hex.pm/api/packages/{name}`` returns
+    all the data we need:
+
+    * ``downloads.week``   — weekly download count (blast-score denominator)
+    * ``downloads.all``    — total all-time downloads
+    * ``downloads.recent`` — last-90-day downloads
+    * ``latest_stable_version`` — current stable release
+    * ``releases``         — full list with ``inserted_at`` timestamps
+    * ``inserted_at``      — package first-published date
+    * ``meta.description`` — one-line summary
+    * ``html_url``         — Hex.pm package page URL
+
+    No authentication required.  Rate limit is generous for single lookups.
+    """
+    result: dict[str, Any] = {"ecosystem": "Hex", "package_name": name}
+    try:
+        data = _get(_HEX_API_URL.format(name))
+
+        # Download stats
+        downloads = data.get("downloads") or {}
+        weekly = downloads.get("week")
+        if weekly is not None:
+            result["weekly_downloads"] = int(weekly)
+        total_dl = downloads.get("all")
+        if total_dl is not None:
+            result["total_downloads"] = int(total_dl)
+        recent_dl = downloads.get("recent")
+        if recent_dl is not None:
+            result["recent_downloads"] = int(recent_dl)  # last 90 days
+
+        # Version metadata
+        latest_stable = data.get("latest_stable_version") or data.get("latest_version")
+        if latest_stable:
+            result["latest_version"] = latest_stable
+
+        releases = data.get("releases") or []
+        result["total_versions"] = len(releases)
+
+        # First release date — last item in list (oldest)
+        if releases:
+            first_ts = releases[-1].get("inserted_at")
+            iso_date, age = _parse_hex_timestamp(first_ts)
+            if iso_date:
+                result["first_release_date"] = iso_date
+            if age is not None:
+                result["age_years"] = age
+
+        # Package-level description and URL
+        meta = data.get("meta") or {}
+        description = meta.get("description") or ""
+        if description:
+            result["description"] = description[:120].replace("\n", " ").strip()
+        html_url = data.get("html_url") or ""
+        if html_url:
+            result["home_page"] = html_url
+
+    except Exception as exc:
+        logger.debug("Hex enrich failed for %s: %s", name, exc)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +476,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("hex", "elixir", "erlang"):
+        return _enrich_hex(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -433,6 +529,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **Hex**: weekly/total downloads + version history (Elixir/Erlang)
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -442,6 +539,8 @@ def get_dependency_blast_radius(  # noqa: C901
     Args:
         package_or_cve: Package spec (``name@version``, ``ecosystem:name@version``)
                         or CVE ID (``CVE-YYYY-NNNN``).
+                        Supported ecosystem prefixes: ``pypi:``, ``npm:``,
+                        ``maven:``, ``hex:``, ``elixir:``.
         max_packages:   Maximum number of packages to enrich with stats (default 10).
 
     Returns:
@@ -558,6 +657,24 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Hex-specific stats
+        if eco.lower() in ("hex", "elixir", "erlang"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions") is not None:
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    Total downloads:  {r['total_downloads']:,}")
+            if r.get("recent_downloads") is not None:
+                lines.append(f"    90-day downloads: {r['recent_downloads']:,}")
+            if r.get("first_release_date"):
+                age_str = f"  ({r['age_years']} yrs)" if r.get("age_years") is not None else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age_str}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("home_page"):
+                lines.append(f"    Hex page:         {r['home_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
