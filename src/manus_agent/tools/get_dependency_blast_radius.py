@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Packagist API     — PHP package metadata, total/monthly downloads,
+                         dependents count, favers, first-release date (PHP only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +53,7 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_PACKAGIST_PKG_URL = "https://packagist.org/packages/{}.json"
 
 _TIMEOUT = 20
 
@@ -373,6 +376,122 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _extract_packagist_latest_stable(versions: dict[str, Any]) -> str:
+    """Return the latest non-dev version string, or empty string if none found."""
+    stable: list[str] = []
+    for vname in versions:
+        # Skip dev/branch aliases: contain "-dev", "dev-", or ".x-dev"
+        if "dev" in vname.lower():
+            continue
+        stable.append(vname)
+    if not stable:
+        return ""
+
+    # Sort descending by the version_normalized field if available, else lexicographic
+    def _sort_key(v: str) -> str:
+        vdata = versions.get(v, {})
+        return vdata.get("version_normalized", v)
+
+    stable.sort(key=_sort_key, reverse=True)
+    return stable[0]
+
+
+def _extract_packagist_first_release(pkg: dict[str, Any]) -> str:
+    """
+    Return the earliest release timestamp as an ISO-8601 string.
+
+    Uses the package-level ``time`` field (first indexed date).  If absent,
+    falls back to the oldest ``time`` value across all version entries.
+    """
+    # Top-level `time` is the package creation/first-indexed date
+    top_time = pkg.get("time", "")
+    if top_time:
+        return top_time
+
+    # Fallback: scan version timestamps
+    versions = pkg.get("versions", {})
+    times: list[str] = []
+    for vdata in versions.values():
+        t = vdata.get("time", "")
+        if t:
+            times.append(t)
+    if not times:
+        return ""
+    times.sort()
+    return times[0]
+
+
+def _enrich_packagist(name: str) -> dict[str, Any]:
+    """
+    Fetch Packagist package metadata for a PHP package.
+
+    Accepts both ``vendor/package`` and plain ``package`` forms.  If no vendor
+    prefix is present the name is used as-is (some single-word legacy packages
+    exist, though modern PHP packages are always namespaced).
+
+    Single API call to ``https://packagist.org/packages/{name}.json``.
+    Returns total/monthly/daily downloads, dependent package count, favers
+    (Packagist stars), latest stable version, first-release date, age in years,
+    total version count, and a short description.
+    """
+    import datetime
+
+    result: dict[str, Any] = {"ecosystem": "Packagist", "package_name": name}
+    try:
+        url = _PACKAGIST_PKG_URL.format(name)
+        data = _get(url)
+        pkg = data.get("package", {})
+
+        # Download stats
+        downloads = pkg.get("downloads", {})
+        result["total_downloads"] = downloads.get("total", 0)
+        result["monthly_downloads"] = downloads.get("monthly", 0)
+        result["daily_downloads"] = downloads.get("daily", 0)
+        # Use monthly/4 as a weekly-downloads proxy so _blast_score works
+        monthly = downloads.get("monthly") or 0
+        result["weekly_downloads"] = int(monthly / 4) if monthly else None
+
+        # Dependents + social
+        result["dependent_packages_count"] = pkg.get("dependents", 0)
+        result["favers"] = pkg.get("favers", 0)
+
+        # Description
+        desc = pkg.get("description", "") or ""
+        result["description"] = desc[:120]
+
+        # Versions
+        versions = pkg.get("versions", {})
+        result["total_versions"] = len(versions)
+        latest_stable = _extract_packagist_latest_stable(versions)
+        if latest_stable:
+            result["latest_version"] = latest_stable
+
+        # First-release date + age
+        first_ts = _extract_packagist_first_release(pkg)
+        if first_ts:
+            result["first_release_date"] = first_ts
+            try:
+                # Normalise ISO-8601: handle Z suffix and +HH:MM offset
+                ts_clean = first_ts.rstrip("Z").replace("+00:00", "")
+                # Truncate sub-second to 6 digits
+                if "." in ts_clean:
+                    dot_idx = ts_clean.index(".")
+                    ts_clean = ts_clean[: dot_idx + 7]
+                first_dt = datetime.datetime.fromisoformat(ts_clean)
+                age_years = (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - first_dt).days / 365.25
+                result["age_years"] = round(age_years, 1)
+            except Exception:
+                pass
+
+        # Homepage
+        if pkg.get("repository"):
+            result["home_page"] = pkg["repository"]
+
+    except Exception as exc:
+        logger.debug("Packagist enrich failed for %s: %s", name, exc)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +501,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("packagist", "php", "composer"):
+        return _enrich_packagist(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -433,6 +554,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **Packagist**: total/monthly downloads, dependent count, favers, first-release date
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -559,6 +681,26 @@ def get_dependency_blast_radius(  # noqa: C901
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
 
+        # Packagist-specific stats
+        if eco.lower() in ("packagist", "php", "composer"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']:,}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    Total downloads:  {r['total_downloads']:,}")
+            if r.get("dependent_packages_count") is not None:
+                lines.append(f"    PHP dependents:   {r['dependent_packages_count']:,}")
+            if r.get("favers") is not None:
+                lines.append(f"    Packagist favers: {r['favers']:,}")
+            if r.get("first_release_date"):
+                age = f"  ({r['age_years']} years old)" if r.get("age_years") else ""
+                lines.append(f"    First released:   {r['first_release_date'][:10]}{age}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("home_page"):
+                lines.append(f"    Repository:       {r['home_page']}")
+
         if source:
             lines.append(f"    Data sources:     {source}")
 
@@ -577,6 +719,6 @@ def get_dependency_blast_radius(  # noqa: C901
         if total_weekly:
             sections.append(f"         Total weekly downloads across all packages: {total_weekly:,}")
         if total_dependents:
-            sections.append(f"         Total npm dependent packages: {total_dependents:,}")
+            sections.append(f"         Total dependent packages: {total_dependents:,}")
 
     return "\n".join(sections)

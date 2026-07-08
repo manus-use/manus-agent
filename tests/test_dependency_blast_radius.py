@@ -17,7 +17,10 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
+    _enrich_packagist,
     _enrich_pypi,
+    _extract_packagist_first_release,
+    _extract_packagist_latest_stable,
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
@@ -637,8 +640,238 @@ class TestEnrichMaven:
 
 
 # ===========================================================================
-# _enrich_package dispatch
+# _extract_packagist_latest_stable
 # ===========================================================================
+
+
+class TestExtractPackagistLatestStable:
+    def _make_versions(self, names: list[str]) -> dict[str, Any]:
+        """Build a minimal versions dict keyed by version name."""
+        return {v: {"version": v, "version_normalized": v} for v in names}
+
+    def test_returns_latest_stable_version(self):
+        versions = self._make_versions(["1.0.0", "1.1.0", "1.2.0"])
+        assert _extract_packagist_latest_stable(versions) == "1.2.0"
+
+    def test_skips_dev_branch_aliases(self):
+        versions = self._make_versions(["1.0.0", "2.0.x-dev", "dev-main", "1.1.0"])
+        result = _extract_packagist_latest_stable(versions)
+        assert "dev" not in result.lower()
+        assert result in ("1.0.0", "1.1.0")
+
+    def test_returns_empty_when_only_dev_versions(self):
+        versions = self._make_versions(["dev-main", "1.0.x-dev", "2.0.x-dev"])
+        assert _extract_packagist_latest_stable(versions) == ""
+
+    def test_returns_empty_for_empty_versions(self):
+        assert _extract_packagist_latest_stable({}) == ""
+
+    def test_uses_version_normalized_for_sort(self):
+        # version_normalized gives proper sort order
+        versions = {
+            "v1.0.0": {"version": "v1.0.0", "version_normalized": "1.0.0.0"},
+            "v2.0.0": {"version": "v2.0.0", "version_normalized": "2.0.0.0"},
+            "v1.5.0": {"version": "v1.5.0", "version_normalized": "1.5.0.0"},
+        }
+        result = _extract_packagist_latest_stable(versions)
+        assert result == "v2.0.0"
+
+
+# ===========================================================================
+# _extract_packagist_first_release
+# ===========================================================================
+
+
+class TestExtractPackagistFirstRelease:
+    def test_uses_top_level_time_field(self):
+        pkg = {"time": "2015-03-12T10:00:00+00:00", "versions": {}}
+        assert _extract_packagist_first_release(pkg) == "2015-03-12T10:00:00+00:00"
+
+    def test_falls_back_to_oldest_version_time(self):
+        pkg = {
+            "versions": {
+                "1.0.0": {"time": "2018-06-01T00:00:00+00:00"},
+                "1.1.0": {"time": "2019-01-15T00:00:00+00:00"},
+                "0.9.0": {"time": "2017-11-20T00:00:00+00:00"},
+            }
+        }
+        result = _extract_packagist_first_release(pkg)
+        assert result == "2017-11-20T00:00:00+00:00"
+
+    def test_returns_empty_when_no_times(self):
+        pkg = {"versions": {"1.0.0": {"name": "foo/bar"}}}
+        assert _extract_packagist_first_release(pkg) == ""
+
+    def test_returns_empty_for_empty_package(self):
+        assert _extract_packagist_first_release({}) == ""
+
+    def test_top_level_time_preferred_over_versions(self):
+        # Even if a version has an earlier timestamp, top-level time wins
+        pkg = {
+            "time": "2020-01-01T00:00:00+00:00",
+            "versions": {
+                "1.0.0": {"time": "2010-01-01T00:00:00+00:00"},
+            },
+        }
+        assert _extract_packagist_first_release(pkg) == "2020-01-01T00:00:00+00:00"
+
+
+# ===========================================================================
+# _enrich_packagist
+# ===========================================================================
+
+
+class TestEnrichPackagist:
+    def _make_packagist_response(self, name: str = "symfony/http-foundation") -> dict[str, Any]:
+        """Build a representative Packagist API response."""
+        return {
+            "package": {
+                "name": name,
+                "description": "Defines an object-oriented layer for the HTTP specification",
+                "time": "2011-10-16T03:42:31+00:00",
+                "repository": "https://github.com/symfony/http-foundation",
+                "downloads": {
+                    "total": 931_081_858,
+                    "monthly": 16_475_574,
+                    "daily": 583_621,
+                },
+                "favers": 8707,
+                "dependents": 5929,
+                "versions": {
+                    "v7.3.0": {
+                        "version": "v7.3.0",
+                        "version_normalized": "7.3.0.0",
+                        "time": "2025-01-01T00:00:00+00:00",
+                    },
+                    "v6.4.0": {
+                        "version": "v6.4.0",
+                        "version_normalized": "6.4.0.0",
+                        "time": "2023-11-01T00:00:00+00:00",
+                    },
+                    "v7.4.x-dev": {
+                        "version": "v7.4.x-dev",
+                        "version_normalized": "7.4.9999999.9999999-dev",
+                        "time": "2026-01-01T00:00:00+00:00",
+                    },
+                },
+            }
+        }
+
+    def test_returns_package_metadata(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["ecosystem"] == "Packagist"
+        assert result["package_name"] == "symfony/http-foundation"
+        assert result["total_downloads"] == 931_081_858
+        assert result["monthly_downloads"] == 16_475_574
+        assert result["daily_downloads"] == 583_621
+        assert result["dependent_packages_count"] == 5929
+        assert result["favers"] == 8707
+
+    def test_weekly_downloads_is_monthly_divided_by_four(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["weekly_downloads"] == 16_475_574 // 4
+
+    def test_weekly_downloads_none_when_monthly_absent(self):
+        resp = self._make_packagist_response()
+        del resp["package"]["downloads"]["monthly"]
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["weekly_downloads"] is None
+
+    def test_description_truncated_to_120_chars(self):
+        resp = self._make_packagist_response()
+        resp["package"]["description"] = "x" * 200
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert len(result["description"]) == 120
+
+    def test_first_release_date_and_age_years(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["first_release_date"] == "2011-10-16T03:42:31+00:00"
+        assert isinstance(result["age_years"], float)
+        assert result["age_years"] > 10.0  # symfony/http-foundation is 14+ years old
+
+    def test_latest_stable_version_excludes_dev(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        # v7.3.0 is the latest stable (v7.4.x-dev skipped)
+        assert result.get("latest_version") == "v7.3.0"
+
+    def test_total_versions_count(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["total_versions"] == 3
+
+    def test_home_page_set_from_repository(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        assert result["home_page"] == "https://github.com/symfony/http-foundation"
+
+    def test_graceful_degradation_on_http_error(self):
+        with patch("requests.get", side_effect=Exception("404 Not Found")):
+            result = _enrich_packagist("nonexistent/package")
+        assert result["ecosystem"] == "Packagist"
+        assert result["package_name"] == "nonexistent/package"
+        # No stats keys should be present on total failure
+        assert "total_downloads" not in result
+
+    def test_blast_score_critical_for_large_monthly_downloads(self):
+        """5M+ monthly => weekly proxy >=1.25M => CRITICAL."""
+        resp = self._make_packagist_response()
+        resp["package"]["downloads"]["monthly"] = 20_000_000
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("symfony/http-foundation")
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score
+
+        assert _blast_score(result) == "CRITICAL"
+
+    def test_blast_score_uses_dependent_packages_count(self):
+        """50,000+ dependents => CRITICAL even with low download count."""
+        resp = self._make_packagist_response()
+        resp["package"]["downloads"] = {"total": 100, "monthly": 0, "daily": 0}
+        resp["package"]["dependents"] = 60_000
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp
+        with patch("requests.get", return_value=mock_resp):
+            result = _enrich_packagist("laravel/framework")
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score
+
+        assert _blast_score(result) == "CRITICAL"
+
+    def test_full_output_contains_packagist_fields(self):
+        """Integration: blast-radius output includes PHP-specific lines."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = self._make_packagist_response()
+        with patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]):
+            with patch("manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected", return_value=[]):
+                with patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]):
+                    with patch("requests.get", return_value=mock_resp):
+                        output = get_dependency_blast_radius("packagist:symfony/http-foundation@7.3.0")
+        assert "Total downloads" in output
+        assert "PHP dependents" in output
+        assert "Packagist favers" in output
+        assert "First released" in output
 
 
 class TestEnrichPackageDispatch:
@@ -676,6 +909,24 @@ class TestEnrichPackageDispatch:
         result = _enrich_package("unknown-pkg", "SomeExoticEcosystem")
         assert result["ecosystem"] == "SomeExoticEcosystem"
         assert result["package_name"] == "unknown-pkg"
+
+    def test_packagist_ecosystem(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_packagist") as mock_packagist:
+            mock_packagist.return_value = {"ecosystem": "Packagist", "package_name": "symfony/http-foundation"}
+            _enrich_package("symfony/http-foundation", "Packagist")
+        mock_packagist.assert_called_once_with("symfony/http-foundation")
+
+    def test_php_ecosystem_routes_to_packagist(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_packagist") as mock_packagist:
+            mock_packagist.return_value = {"ecosystem": "Packagist", "package_name": "laravel/framework"}
+            _enrich_package("laravel/framework", "php")
+        mock_packagist.assert_called_once_with("laravel/framework")
+
+    def test_composer_ecosystem_routes_to_packagist(self):
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_packagist") as mock_packagist:
+            mock_packagist.return_value = {"ecosystem": "Packagist", "package_name": "guzzlehttp/guzzle"}
+            _enrich_package("guzzlehttp/guzzle", "composer")
+        mock_packagist.assert_called_once_with("guzzlehttp/guzzle")
 
 
 # ===========================================================================
