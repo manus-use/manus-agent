@@ -933,3 +933,464 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _parse_anaconda_timestamp
+# ===========================================================================
+
+
+class TestParseAnacondaTimestamp:
+    """Unit tests for the Anaconda timestamp parser."""
+
+    def test_standard_format_with_offset(self):
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        dt = _parse_anaconda_timestamp("2016-04-20 07:41:54.299000+00:00")
+        assert dt is not None
+        assert dt.year == 2016
+        assert dt.month == 4
+        assert dt.day == 20
+
+    def test_standard_format_no_microseconds(self):
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        dt = _parse_anaconda_timestamp("2020-06-06 23:22:39+00:00")
+        assert dt is not None
+        assert dt.year == 2020
+        assert dt.month == 6
+        assert dt.day == 6
+
+    def test_empty_string_returns_none(self):
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        assert _parse_anaconda_timestamp("") is None
+
+    def test_none_returns_none(self):
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        assert _parse_anaconda_timestamp(None) is None  # type: ignore[arg-type]
+
+    def test_invalid_string_returns_none(self):
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        assert _parse_anaconda_timestamp("not-a-date") is None
+
+    def test_result_is_utc_aware(self):
+
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        dt = _parse_anaconda_timestamp("2018-03-15 12:00:00.000000+00:00")
+        assert dt is not None
+        assert dt.tzinfo is not None
+        assert dt.utcoffset().total_seconds() == 0  # UTC
+
+    def test_t_separator_also_works(self):
+        """ISO 8601 T-separator variant should also parse."""
+        from manus_agent.tools.get_dependency_blast_radius import _parse_anaconda_timestamp
+
+        dt = _parse_anaconda_timestamp("2021-01-01T00:00:00+00:00")
+        assert dt is not None
+        assert dt.year == 2021
+
+
+# ===========================================================================
+# _enrich_conda
+# ===========================================================================
+
+
+def _make_anaconda_response(
+    name: str = "numpy",
+    ndownloads: int = 141_000_000,
+    latest_version: str = "2.5.1",
+    versions: list | None = None,
+    summary: str = "The fundamental package for scientific computing.",
+    license_str: str = "BSD-3-Clause",
+    home: str = "https://numpy.org",
+    html_url: str = "http://anaconda.org/conda-forge/numpy",
+    files: list | None = None,
+) -> dict:
+    """Build a minimal Anaconda API package response dict."""
+    if versions is None:
+        versions = ["1.11.0", "1.20.0", "1.25.0", "2.0.0", "2.5.1"]
+    if files is None:
+        files = [
+            {"upload_time": "2016-05-20 11:59:19.246000+00:00", "version": "1.11.0"},
+            {"upload_time": "2021-06-15 08:30:00.000000+00:00", "version": "1.21.0"},
+            {"upload_time": "2025-01-01 00:00:00.000000+00:00", "version": "2.5.0"},
+        ]
+    return {
+        "name": name,
+        "ndownloads": ndownloads,
+        "latest_version": latest_version,
+        "versions": versions,
+        "summary": summary,
+        "license": license_str,
+        "home": home,
+        "html_url": html_url,
+        "files": files,
+    }
+
+
+class TestEnrichConda:
+    """Tests for _enrich_conda — all HTTP calls mocked."""
+
+    def _mock_get(self, response_data: dict) -> MagicMock:
+        mock = MagicMock(return_value=response_data)
+        return mock
+
+    def test_basic_fields_populated(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response()
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("numpy")
+
+        assert result["ecosystem"] == "conda"
+        assert result["package_name"] == "numpy"
+        assert result["latest_version"] == "2.5.1"
+        assert result["total_versions"] == 5
+        assert result["total_downloads"] == 141_000_000
+
+    def test_weekly_downloads_is_total_divided_by_52(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(ndownloads=52_000)
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("somelib")
+
+        assert result["weekly_downloads"] == 1_000  # 52_000 // 52
+
+    def test_first_release_date_from_files(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(
+            files=[
+                {"upload_time": "2020-06-01 00:00:00.000000+00:00", "version": "1.0.0"},
+                {"upload_time": "2016-04-20 07:41:54.299000+00:00", "version": "0.9.0"},
+                {"upload_time": "2022-01-15 12:00:00.000000+00:00", "version": "2.0.0"},
+            ]
+        )
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("numpy")
+
+        # Oldest file is 2016-04-20
+        assert result.get("first_release_date") == "2016-04-20"
+        assert result.get("age_years") is not None
+        assert result["age_years"] > 5  # 2016 → ~9 years
+
+    def test_description_truncated_to_120_chars(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        long_desc = "x" * 200
+        data = _make_anaconda_response(summary=long_desc)
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert len(result["description"]) == 120
+
+    def test_description_newlines_stripped(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(summary="line one\nline two\nline three")
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert "\n" not in result["description"]
+
+    def test_license_and_home_page_present(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(license_str="MIT", home="https://example.com")
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert result["license"] == "MIT"
+        assert result["home_page"] == "https://example.com"
+
+    def test_conda_page_html_url(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(html_url="http://anaconda.org/conda-forge/numpy")
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("numpy")
+
+        assert result["conda_page"] == "http://anaconda.org/conda-forge/numpy"
+
+    def test_channel_recorded(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response()
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("numpy")
+
+        assert result["channel"] == "conda-forge"
+
+    def test_fallback_to_anaconda_channel_on_404(self):
+        """When conda-forge raises an HTTP error, fall back to 'anaconda' channel."""
+        import requests as req
+
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        anaconda_data = _make_anaconda_response(ndownloads=5_000_000, latest_version="1.24.0")
+
+        call_count = {"n": 0}
+
+        def side_effect(url, **kwargs):
+            call_count["n"] += 1
+            if "conda-forge" in url:
+                raise req.HTTPError("404 Not Found")
+            return anaconda_data
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", side_effect=side_effect):
+            result = _enrich_conda("numpy")
+
+        assert result["channel"] == "anaconda"
+        assert result["total_downloads"] == 5_000_000
+        assert call_count["n"] == 2  # tried conda-forge, then anaconda
+
+    def test_all_channels_fail_returns_stub(self):
+        """When all channels raise, return a minimal stub dict."""
+        import requests as req
+
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=req.HTTPError("404"),
+        ):
+            result = _enrich_conda("nonexistent-pkg")
+
+        assert result["ecosystem"] == "conda"
+        assert result["package_name"] == "nonexistent-pkg"
+        assert "total_downloads" not in result
+
+    def test_files_without_upload_time_skipped(self):
+        """Files lacking upload_time should not cause a crash."""
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(
+            files=[
+                {"version": "1.0.0"},  # no upload_time
+                {"upload_time": None, "version": "1.1.0"},  # None upload_time
+                {"upload_time": "2021-01-01 00:00:00.000000+00:00", "version": "1.2.0"},
+            ]
+        )
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert result.get("first_release_date") == "2021-01-01"
+
+    def test_no_files_no_first_release_date(self):
+        """Package with empty files list: first_release_date should be absent."""
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(files=[])
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert "first_release_date" not in result
+
+    def test_zero_ndownloads_weekly_is_none(self):
+        """If total downloads is 0 (or missing), weekly_downloads should be None."""
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        data = _make_anaconda_response(ndownloads=0)
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("pkg")
+
+        assert result.get("weekly_downloads") is None
+
+    def test_blast_score_for_high_download_package(self):
+        """141M total → ~2.7M weekly → HIGH blast radius."""
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score, _enrich_conda
+
+        data = _make_anaconda_response(ndownloads=141_000_000)
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("numpy")
+
+        score = _blast_score(result)
+        assert score in ("CRITICAL", "HIGH")
+
+    def test_blast_score_for_low_download_package(self):
+        """500 total → 9 weekly → LOW blast radius."""
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score, _enrich_conda
+
+        data = _make_anaconda_response(ndownloads=500)
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=data):
+            result = _enrich_conda("niche-pkg")
+
+        score = _blast_score(result)
+        assert score == "LOW"
+
+    def test_missing_optional_fields_no_error(self):
+        """A minimal API response (only name + ndownloads) should not crash."""
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_conda
+
+        minimal = {"name": "mypkg", "ndownloads": 1000}
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", return_value=minimal):
+            result = _enrich_conda("mypkg")
+
+        assert result["ecosystem"] == "conda"
+        assert result["total_downloads"] == 1000
+
+
+# ===========================================================================
+# _enrich_package dispatch for conda ecosystem strings
+# ===========================================================================
+
+
+class TestEnrichPackageCondaDispatch:
+    """_enrich_package should route conda/conda-forge/anaconda to _enrich_conda."""
+
+    def test_dispatch_conda(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_conda") as mock:
+            mock.return_value = {"ecosystem": "conda", "package_name": "numpy"}
+            result = _enrich_package("numpy", "conda")
+
+        mock.assert_called_once_with("numpy")
+        assert result["ecosystem"] == "conda"
+
+    def test_dispatch_conda_forge(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_conda") as mock:
+            mock.return_value = {"ecosystem": "conda", "package_name": "pandas"}
+            _enrich_package("pandas", "conda-forge")
+
+        mock.assert_called_once_with("pandas")
+
+    def test_dispatch_anaconda(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_conda") as mock:
+            mock.return_value = {"ecosystem": "conda", "package_name": "scipy"}
+            _enrich_package("scipy", "anaconda")
+
+        mock.assert_called_once_with("scipy")
+
+    def test_conda_not_confused_with_other_ecosystems(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_npm") as npm_mock:
+            npm_mock.return_value = {"ecosystem": "npm", "package_name": "lodash"}
+            result = _enrich_package("lodash", "npm")
+
+        npm_mock.assert_called_once()
+        assert result["ecosystem"] == "npm"
+
+
+# ===========================================================================
+# Integration: conda package spec in get_dependency_blast_radius
+# ===========================================================================
+
+
+class TestGetDependencyBlastRadiusConda:
+    """End-to-end integration tests for conda package spec handling."""
+
+    def _conda_stats(self) -> dict:
+        return {
+            "ecosystem": "conda",
+            "package_name": "numpy",
+            "latest_version": "2.5.1",
+            "total_versions": 115,
+            "total_downloads": 141_000_000,
+            "weekly_downloads": 2_711_538,
+            "first_release_date": "2016-05-20",
+            "age_years": 10.1,
+            "description": "The fundamental package for scientific computing with Python.",
+            "license": "BSD-3-Clause",
+            "home_page": "https://numpy.org",
+            "conda_page": "http://anaconda.org/conda-forge/numpy",
+            "channel": "conda-forge",
+        }
+
+    def test_conda_spec_produces_output(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy@1.26.0")
+
+        assert "numpy" in result
+        assert isinstance(result, str)
+
+    def test_conda_blast_label_in_output(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy@1.26.0")
+
+        assert "HIGH" in result or "CRITICAL" in result
+
+    def test_conda_metadata_in_output(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy@1.26.0")
+
+        # Specific conda output fields
+        assert "2.5.1" in result  # latest version
+        assert "BSD-3-Clause" in result  # license
+        assert "141,000,000" in result  # total downloads
+        assert "2016-05-20" in result  # first release date
+
+    def test_conda_weekly_downloads_label(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy@1.26.0")
+
+        assert "Weekly avg" in result or "weekly" in result.lower()
+
+    def test_ecosystem_label_conda_in_output(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy@1.26.0")
+
+        assert "conda" in result.lower() or "Anaconda" in result
+
+    def test_conda_without_version_parses_correctly(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._conda_stats(),
+        ):
+            result = get_dependency_blast_radius("conda:numpy")
+
+        assert "numpy" in result
+
+
+# ===========================================================================
+# _ECOSYSTEM_LABEL includes conda
+# ===========================================================================
+
+
+class TestEcosystemLabelConda:
+    def test_conda_label_present(self):
+        from manus_agent.tools.get_dependency_blast_radius import _ECOSYSTEM_LABEL
+
+        assert "conda" in _ECOSYSTEM_LABEL
+
+    def test_conda_label_mentions_anaconda(self):
+        from manus_agent.tools.get_dependency_blast_radius import _ECOSYSTEM_LABEL
+
+        assert "Anaconda" in _ECOSYSTEM_LABEL["conda"] or "conda" in _ECOSYSTEM_LABEL["conda"].lower()
