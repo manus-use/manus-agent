@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
+    _ECOSYSTEM_TO_OSV,
     _blast_score,
     _enrich_maven,
     _enrich_npm,
@@ -21,6 +22,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _fetch_osv_package_vulns,
     _parse_input,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
@@ -933,3 +935,480 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _fetch_osv_package_vulns — OSV per-package CVE lookup
+# ===========================================================================
+
+
+class TestEcosystemToOsvMapping:
+    """_ECOSYSTEM_TO_OSV maps blast-radius input aliases → canonical OSV strings."""
+
+    def test_pypi_variants(self):
+        assert _ECOSYSTEM_TO_OSV["pypi"] == "PyPI"
+        assert _ECOSYSTEM_TO_OSV["python"] == "PyPI"
+        assert _ECOSYSTEM_TO_OSV["pip"] == "PyPI"
+
+    def test_npm_variants(self):
+        assert _ECOSYSTEM_TO_OSV["npm"] == "npm"
+        assert _ECOSYSTEM_TO_OSV["javascript"] == "npm"
+        assert _ECOSYSTEM_TO_OSV["node"] == "npm"
+
+    def test_maven_variants(self):
+        assert _ECOSYSTEM_TO_OSV["maven"] == "Maven"
+        assert _ECOSYSTEM_TO_OSV["java"] == "Maven"
+        assert _ECOSYSTEM_TO_OSV["gradle"] == "Maven"
+
+    def test_go_variants(self):
+        assert _ECOSYSTEM_TO_OSV["go"] == "Go"
+        assert _ECOSYSTEM_TO_OSV["golang"] == "Go"
+
+    def test_rust_variants(self):
+        assert _ECOSYSTEM_TO_OSV["crates.io"] == "crates.io"
+        assert _ECOSYSTEM_TO_OSV["rust"] == "crates.io"
+        assert _ECOSYSTEM_TO_OSV["cargo"] == "crates.io"
+
+    def test_ruby_variants(self):
+        assert _ECOSYSTEM_TO_OSV["rubygems"] == "RubyGems"
+        assert _ECOSYSTEM_TO_OSV["ruby"] == "RubyGems"
+        assert _ECOSYSTEM_TO_OSV["gem"] == "RubyGems"
+
+    def test_dotnet_variants(self):
+        assert _ECOSYSTEM_TO_OSV["nuget"] == "NuGet"
+        assert _ECOSYSTEM_TO_OSV["dotnet"] == "NuGet"
+
+    def test_php_variants(self):
+        assert _ECOSYSTEM_TO_OSV["packagist"] == "Packagist"
+        assert _ECOSYSTEM_TO_OSV["php"] == "Packagist"
+        assert _ECOSYSTEM_TO_OSV["composer"] == "Packagist"
+
+    def test_elixir_variants(self):
+        assert _ECOSYSTEM_TO_OSV["hex"] == "Hex"
+        assert _ECOSYSTEM_TO_OSV["elixir"] == "Hex"
+        assert _ECOSYSTEM_TO_OSV["erlang"] == "Hex"
+
+    def test_dart_variants(self):
+        assert _ECOSYSTEM_TO_OSV["pub"] == "Pub"
+        assert _ECOSYSTEM_TO_OSV["dart"] == "Pub"
+        assert _ECOSYSTEM_TO_OSV["flutter"] == "Pub"
+
+
+class TestFetchOsvPackageVulns:
+    """Unit tests for _fetch_osv_package_vulns."""
+
+    def _make_osv_response(self, vulns):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"vulns": vulns}
+        mock_resp.status_code = 200
+        return mock_resp
+
+    def test_returns_empty_on_unknown_ecosystem(self):
+        """Empty ecosystem string → skip query, return []."""
+        result = _fetch_osv_package_vulns("somelib", "")
+        assert result == []
+
+    def test_returns_empty_on_empty_name(self):
+        """Empty package name → skip query, return []."""
+        result = _fetch_osv_package_vulns("", "PyPI")
+        assert result == []
+
+    def test_basic_vuln_response(self):
+        """A standard OSV response is parsed into id/summary/aliases."""
+        vulns_payload = [
+            {
+                "id": "GHSA-abcd-1234-efgh",
+                "summary": "Remote code execution in foobar",
+                "aliases": ["CVE-2023-12345"],
+                "affected": [],
+            }
+        ]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": vulns_payload}):
+            result = _fetch_osv_package_vulns("foobar", "PyPI")
+        assert len(result) == 1
+        assert result[0]["id"] == "GHSA-abcd-1234-efgh"
+        assert result[0]["summary"] == "Remote code execution in foobar"
+        assert "CVE-2023-12345" in result[0]["aliases"]
+
+    def test_version_filter_passed_in_payload(self):
+        """When version is given, it is included in the POST payload."""
+        captured_payloads: list[Any] = []
+
+        def fake_post(url, payload):
+            captured_payloads.append(payload)
+            return {"vulns": []}
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", side_effect=fake_post):
+            _fetch_osv_package_vulns("requests", "PyPI", version="2.28.0")
+
+        assert len(captured_payloads) == 1
+        payload = captured_payloads[0]
+        assert payload["version"] == "2.28.0"
+        assert payload["package"]["name"] == "requests"
+        assert payload["package"]["ecosystem"] == "PyPI"
+
+    def test_no_version_filter_omits_version_key(self):
+        """Without a version, the POST payload must NOT include 'version'."""
+        captured_payloads: list[Any] = []
+
+        def fake_post(url, payload):
+            captured_payloads.append(payload)
+            return {"vulns": []}
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", side_effect=fake_post):
+            _fetch_osv_package_vulns("requests", "PyPI", version=None)
+
+        assert "version" not in captured_payloads[0]
+
+    def test_ecosystem_alias_resolved(self):
+        """'python' alias is resolved to canonical 'PyPI' in the POST payload."""
+        captured_payloads: list[Any] = []
+
+        def fake_post(url, payload):
+            captured_payloads.append(payload)
+            return {"vulns": []}
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", side_effect=fake_post):
+            _fetch_osv_package_vulns("requests", "python")
+
+        assert captured_payloads[0]["package"]["ecosystem"] == "PyPI"
+
+    def test_returns_empty_on_network_error(self):
+        """A requests exception returns [] and does not raise."""
+        import requests as req_lib
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._post",
+            side_effect=req_lib.exceptions.ConnectionError("timeout"),
+        ):
+            result = _fetch_osv_package_vulns("requests", "PyPI")
+        assert result == []
+
+    def test_max_vulns_cap_respected(self):
+        """max_vulns limits the number of entries returned."""
+        many_vulns = [{"id": f"GHSA-{i:04d}", "summary": "bug", "aliases": [], "affected": []} for i in range(20)]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": many_vulns}):
+            result = _fetch_osv_package_vulns("biglib", "PyPI", max_vulns=5)
+        assert len(result) == 5
+
+    def test_fixed_version_extracted(self):
+        """When OSV includes range events with 'fixed', that version is surfaced."""
+        vuln_with_fix = [
+            {
+                "id": "GHSA-fix-test",
+                "summary": "Fix available",
+                "aliases": ["CVE-2024-9999"],
+                "affected": [
+                    {
+                        "package": {"name": "mylib", "ecosystem": "PyPI"},
+                        "ranges": [
+                            {
+                                "type": "ECOSYSTEM",
+                                "events": [
+                                    {"introduced": "1.0.0"},
+                                    {"fixed": "2.1.0"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": vuln_with_fix}):
+            result = _fetch_osv_package_vulns("mylib", "PyPI")
+        assert len(result) == 1
+        assert result[0].get("fixed") == "2.1.0"
+
+    def test_no_fixed_version_when_absent(self):
+        """When OSV range events have no 'fixed', the 'fixed' key is absent."""
+        vuln_no_fix = [
+            {
+                "id": "GHSA-no-fix",
+                "summary": "No fix yet",
+                "aliases": [],
+                "affected": [
+                    {
+                        "package": {"name": "mylib", "ecosystem": "PyPI"},
+                        "ranges": [
+                            {
+                                "type": "ECOSYSTEM",
+                                "events": [{"introduced": "0.1.0"}],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": vuln_no_fix}):
+            result = _fetch_osv_package_vulns("mylib", "PyPI")
+        assert len(result) == 1
+        assert "fixed" not in result[0]
+
+    def test_empty_vulns_list(self):
+        """An OSV response with no vulns returns []."""
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": []}):
+            result = _fetch_osv_package_vulns("safe-package", "npm")
+        assert result == []
+
+    def test_missing_vulns_key(self):
+        """An OSV response missing 'vulns' key returns [] gracefully."""
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={}):
+            result = _fetch_osv_package_vulns("safe-package", "npm")
+        assert result == []
+
+    def test_summary_truncated_to_120_chars(self):
+        """Long summaries are capped at 120 characters."""
+        long_summary = "X" * 200
+        vulns = [{"id": "GHSA-long", "summary": long_summary, "aliases": [], "affected": []}]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": vulns}):
+            result = _fetch_osv_package_vulns("lib", "PyPI")
+        assert len(result[0]["summary"]) == 120
+
+    def test_unknown_ecosystem_passed_through(self):
+        """An ecosystem not in the mapping is passed through as-is to OSV."""
+        captured_payloads: list[Any] = []
+
+        def fake_post(url, payload):
+            captured_payloads.append(payload)
+            return {"vulns": []}
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", side_effect=fake_post):
+            _fetch_osv_package_vulns("somelib", "UnknownEco")
+
+        assert captured_payloads[0]["package"]["ecosystem"] == "UnknownEco"
+
+    def test_fixed_extracted_only_from_matching_package(self):
+        """Fixed version is only extracted from OSV affected entries matching the queried package."""
+        vuln_mixed = [
+            {
+                "id": "GHSA-mixed",
+                "summary": "Multi-package vuln",
+                "aliases": [],
+                "affected": [
+                    # Different package: should NOT contribute the fixed version
+                    {
+                        "package": {"name": "other-lib", "ecosystem": "PyPI"},
+                        "ranges": [
+                            {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "99.0.0"}]}
+                        ],
+                    },
+                    # Matching package: fixed should be taken from here
+                    {
+                        "package": {"name": "mylib", "ecosystem": "PyPI"},
+                        "ranges": [
+                            {"type": "ECOSYSTEM", "events": [{"introduced": "1.0"}, {"fixed": "1.5.0"}]}
+                        ],
+                    },
+                ],
+            }
+        ]
+        with patch("manus_agent.tools.get_dependency_blast_radius._post", return_value={"vulns": vuln_mixed}):
+            result = _fetch_osv_package_vulns("mylib", "PyPI")
+        assert result[0].get("fixed") == "1.5.0"
+
+
+# ===========================================================================
+# Integration: OSV CVE data surfaces in get_dependency_blast_radius output
+# ===========================================================================
+
+
+class TestBlastRadiusOsvIntegration:
+    """Integration tests verifying OSV CVE output in direct package queries."""
+
+    def test_osv_vulns_shown_in_direct_package_output(self):
+        """Direct package query includes Known CVEs section."""
+        osv_vulns = [
+            {"id": "GHSA-test-0001", "summary": "Test vulnerability", "aliases": ["CVE-2024-0001"]},
+        ]
+        pypi_stats = {
+            "ecosystem": "PyPI",
+            "package_name": "requests",
+            "weekly_downloads": 5_000_000,
+        }
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=pypi_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("pypi:requests@2.28.0")
+        assert "Known CVEs" in result
+        assert "GHSA-test-0001" in result
+        assert "CVE-2024-0001" in result
+
+    def test_osv_fixed_version_shown_in_output(self):
+        """When a fixed version is available it appears after → in the output."""
+        osv_vulns = [
+            {
+                "id": "GHSA-fix-shown",
+                "summary": "Patched in 2.31.0",
+                "aliases": [],
+                "fixed": "2.31.0",
+            }
+        ]
+        pypi_stats = {"ecosystem": "PyPI", "package_name": "requests", "weekly_downloads": 1_000}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=pypi_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("pypi:requests@2.28.0")
+        assert "fixed: 2.31.0" in result
+
+    def test_no_cves_found_message(self):
+        """When OSV returns no CVEs, 'none found' is shown (not silent)."""
+        pypi_stats = {"ecosystem": "PyPI", "package_name": "safe-lib", "weekly_downloads": 500}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=pypi_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=[],
+            ),
+        ):
+            result = get_dependency_blast_radius("pypi:safe-lib")
+        assert "none found" in result.lower()
+
+    def test_osv_lookup_not_called_for_cve_input(self):
+        """_fetch_osv_package_vulns must NOT be called when input is a CVE id."""
+        pkgs = [{"name": "log4j-core", "ecosystem": "Maven", "version_range": ">=2.0,<2.15", "source": "osv"}]
+        maven_stats = {"ecosystem": "Maven", "package_name": "log4j-core", "latest_version": "2.22.0"}
+        with (
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected", return_value=pkgs),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=maven_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns"
+            ) as mock_osv_pkg,
+        ):
+            _result = get_dependency_blast_radius("CVE-2021-44228")
+        mock_osv_pkg.assert_not_called()
+
+    def test_summary_includes_cve_count(self):
+        """Summary section includes 'Known CVEs from OSV' count."""
+        osv_vulns = [
+            {"id": "GHSA-a", "summary": "Bug A", "aliases": []},
+            {"id": "GHSA-b", "summary": "Bug B", "aliases": []},
+        ]
+        npm_stats = {"ecosystem": "npm", "package_name": "lodash", "weekly_downloads": 20_000_000}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=npm_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("npm:lodash@4.17.20")
+        assert "Known CVEs from OSV" in result
+
+    def test_version_scope_label_with_version(self):
+        """Output shows 'affecting @<version>' when version is given."""
+        osv_vulns = [{"id": "GHSA-versioned", "summary": "Versioned bug", "aliases": []}]
+        npm_stats = {"ecosystem": "npm", "package_name": "lodash", "weekly_downloads": 100}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=npm_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("npm:lodash@4.17.20")
+        assert "affecting @4.17.20" in result
+
+    def test_version_scope_label_without_version(self):
+        """Output shows '(all versions)' when no version is specified."""
+        osv_vulns = [{"id": "GHSA-all-ver", "summary": "All versions bug", "aliases": []}]
+        npm_stats = {"ecosystem": "npm", "package_name": "lodash", "weekly_downloads": 100}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=npm_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("npm:lodash")
+        assert "(all versions)" in result
+
+    def test_osv_vulns_version_passed_correctly(self):
+        """_fetch_osv_package_vulns is called with the right version."""
+        captured_calls: list[Any] = []
+
+        def fake_osv_pkg(name, ecosystem, version=None, max_vulns=10):
+            captured_calls.append({"name": name, "ecosystem": ecosystem, "version": version})
+            return []
+
+        npm_stats = {"ecosystem": "npm", "package_name": "lodash", "weekly_downloads": 100}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=npm_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                side_effect=fake_osv_pkg,
+            ),
+        ):
+            _result = get_dependency_blast_radius("npm:lodash@4.17.20")
+
+        assert captured_calls[0]["version"] == "4.17.20"
+
+    def test_cve_alias_shown_in_output(self):
+        """CVE alias is displayed in brackets after the GHSA id."""
+        osv_vulns = [
+            {"id": "GHSA-alias-test", "summary": "Alias test", "aliases": ["CVE-2024-55555"]}
+        ]
+        npm_stats = {"ecosystem": "npm", "package_name": "axios", "weekly_downloads": 5_000_000}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=npm_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("npm:axios@1.6.0")
+        assert "[CVE-2024-55555]" in result
+
+    def test_version_note_in_summary_with_version(self):
+        """Summary section includes 'affecting version X.Y.Z' when version given."""
+        osv_vulns = [{"id": "GHSA-v-note", "summary": "v note test", "aliases": []}]
+        pypi_stats = {"ecosystem": "PyPI", "package_name": "flask", "weekly_downloads": 3_000_000}
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=pypi_stats,
+            ),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_package_vulns",
+                return_value=osv_vulns,
+            ),
+        ):
+            result = get_dependency_blast_radius("pypi:flask@2.0.0")
+        assert "affecting version 2.0.0" in result
