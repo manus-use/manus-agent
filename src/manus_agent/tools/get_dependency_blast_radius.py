@@ -8,7 +8,8 @@ on the affected package, and how widely it is downloaded.
 Data sources (all free, no API key required):
   1. NVD CVE 2.0 API  — maps CVE → affected packages + version ranges
   2. OSV.dev API       — cross-ecosystem vulnerability data (PyPI, npm, Maven,
-                         Go, RubyGems, crates.io, …)
+                         Go, RubyGems, crates.io, …); also used for per-package
+                         known-CVE lookup on direct package queries
   3. GitHub Advisory DB — GHSA packages + ecosystems
   4. npm registry API  — dependents count + weekly download stats (npm only)
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
@@ -51,6 +52,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_OSV_PKG_QUERY_URL = "https://api.osv.dev/v1/query"
+_OSV_PKG_VULN_MAX = 10  # cap on how many OSV vulns to surface per package
 
 _TIMEOUT = 20
 
@@ -373,6 +376,126 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# OSV per-package CVE lookup
+# ---------------------------------------------------------------------------
+
+# Map from ecosystem aliases used in blast-radius input (lower-case) to the
+# canonical OSV ecosystem string expected by the POST /v1/query endpoint.
+_ECOSYSTEM_TO_OSV: dict[str, str] = {
+    "pypi": "PyPI",
+    "python": "PyPI",
+    "pip": "PyPI",
+    "npm": "npm",
+    "javascript": "npm",
+    "node": "npm",
+    "maven": "Maven",
+    "java": "Maven",
+    "gradle": "Maven",
+    "go": "Go",
+    "golang": "Go",
+    "crates.io": "crates.io",
+    "rust": "crates.io",
+    "cargo": "crates.io",
+    "rubygems": "RubyGems",
+    "ruby": "RubyGems",
+    "gem": "RubyGems",
+    "nuget": "NuGet",
+    "dotnet": "NuGet",
+    ".net": "NuGet",
+    "packagist": "Packagist",
+    "php": "Packagist",
+    "composer": "Packagist",
+    "hex": "Hex",
+    "elixir": "Hex",
+    "erlang": "Hex",
+    "pub": "Pub",
+    "dart": "Pub",
+    "flutter": "Pub",
+    "conda": "ConanCenter",  # OSV uses ConanCenter for C/C++ conan packages
+    "conan": "ConanCenter",
+}
+
+
+def _fetch_osv_package_vulns(
+    name: str,
+    ecosystem: str,
+    version: str | None = None,
+    max_vulns: int = _OSV_PKG_VULN_MAX,
+) -> list[dict[str, Any]]:
+    """Query OSV.dev for known vulnerabilities affecting a package.
+
+    Args:
+        name:      Package name (e.g. ``requests``).
+        ecosystem: Ecosystem string — either a canonical OSV ecosystem name
+                   (``PyPI``, ``npm``, ``Maven``, …) or a blast-radius alias
+                   (``python``, ``node``, ``java``, …).
+        version:   When supplied, OSV returns only vulns that affect this
+                   specific version rather than the whole package history.
+        max_vulns: Cap on how many vuln records to return (avoids flooding
+                   output for heavily-CVE'd packages like OpenSSL).
+
+    Returns:
+        A list of dicts, each with keys: ``id`` (OSV/GHSA/CVE id), ``summary``,
+        ``aliases`` (CVE ids when the primary id is a GHSA), and optionally
+        ``fixed`` (first-fixed version from OSV range data).  Empty list on
+        any failure.
+    """
+    # Resolve to canonical OSV ecosystem string.
+    osv_eco = _ECOSYSTEM_TO_OSV.get(ecosystem.lower(), ecosystem) if ecosystem else ""
+    if not osv_eco or not name:
+        return []
+
+    payload: dict[str, Any] = {"package": {"name": name, "ecosystem": osv_eco}}
+    if version:
+        payload["version"] = version
+
+    try:
+        raw = _post(_OSV_PKG_QUERY_URL, payload)
+    except Exception as exc:
+        logger.debug("OSV package query failed for %s/%s: %s", osv_eco, name, exc)
+        return []
+
+    vulns_raw = raw.get("vulns", []) or []
+    results: list[dict[str, Any]] = []
+    for vuln in vulns_raw[:max_vulns]:
+        if not isinstance(vuln, dict):
+            continue
+        vuln_id = vuln.get("id", "")
+        summary = (vuln.get("summary") or "")[:120]
+        aliases = [a for a in (vuln.get("aliases") or []) if isinstance(a, str)]
+
+        # Extract the first-fixed version from the affected ranges in this
+        # vuln record (OSV batch query returns lightweight records; the full
+        # fixed version is often present in the top-level ``affected``
+        # array even in the summary response).
+        fixed: str | None = None
+        for affected_entry in vuln.get("affected", []) or []:
+            if not isinstance(affected_entry, dict):
+                continue
+            pkg = affected_entry.get("package") or {}
+            # Only extract fixed from entries matching our package.
+            if isinstance(pkg, dict) and pkg.get("ecosystem") == osv_eco and pkg.get("name", "").lower() == name.lower():
+                for rng in affected_entry.get("ranges", []) or []:
+                    if not isinstance(rng, dict):
+                        continue
+                    for ev in rng.get("events", []) or []:
+                        if isinstance(ev, dict) and "fixed" in ev:
+                            fixed = str(ev["fixed"])
+                            break
+                    if fixed:
+                        break
+            if fixed:
+                break
+
+        entry: dict[str, Any] = {"id": vuln_id, "summary": summary, "aliases": aliases}
+        if fixed:
+            entry["fixed"] = fixed
+        results.append(entry)
+
+    return results
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -415,7 +538,6 @@ def _blast_score(stats: dict[str, Any]) -> str:
 # Main tool function
 # ---------------------------------------------------------------------------
 
-
 @tool
 def get_dependency_blast_radius(  # noqa: C901
     package_or_cve: str,
@@ -434,6 +556,10 @@ def get_dependency_blast_radius(  # noqa: C901
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
+    4. For direct package queries, also surfaces known CVEs/GHSAs from OSV.dev
+       so you see both the blast radius *and* the package's vulnerability history
+       in one call.  When a version is specified, only CVEs affecting that exact
+       version are returned.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
     to a vulnerability — the answer is often orders of magnitude larger than
@@ -445,8 +571,8 @@ def get_dependency_blast_radius(  # noqa: C901
         max_packages:   Maximum number of packages to enrich with stats (default 10).
 
     Returns:
-        A structured text report with per-package exposure stats and a
-        summary blast-radius label.
+        A structured text report with per-package exposure stats, known CVEs
+        (for direct package queries), and a summary blast-radius label.
     """
     try:
         parsed = _parse_input(package_or_cve)
@@ -455,6 +581,12 @@ def get_dependency_blast_radius(  # noqa: C901
 
     sections: list[str] = []
     all_packages: list[dict[str, Any]] = []
+
+    # Track whether this is a direct package query (vs CVE→packages lookup)
+    is_direct_package = parsed["kind"] == "package"
+    # For direct queries, capture version/ecosystem for OSV CVE lookup
+    direct_version: str | None = None
+    direct_ecosystem: str = ""
 
     if parsed["kind"] == "cve":
         cve_id = parsed["cve_id"]
@@ -500,8 +632,10 @@ def get_dependency_blast_radius(  # noqa: C901
                 "source": "direct",
             }
         ]
+        direct_version = version
+        direct_ecosystem = ecosystem
 
-    # Enrich each package with stats
+    # Enrich each package with download/dependent stats
     enriched_results: list[dict[str, Any]] = []
     for pkg in all_packages:
         eco = pkg.get("ecosystem", "")
@@ -511,6 +645,12 @@ def get_dependency_blast_radius(  # noqa: C901
         stats["source"] = pkg.get("source", "")
         blast = _blast_score(stats)
         stats["blast_radius"] = blast
+        # For direct package queries: fetch known CVEs from OSV and attach to
+        # stats so the output shows vulnerability history alongside blast radius.
+        if is_direct_package:
+            stats["osv_vulns"] = _fetch_osv_package_vulns(
+                name, eco or direct_ecosystem, version=direct_version
+            )
         enriched_results.append(stats)
 
     # Sort by blast severity
@@ -562,6 +702,23 @@ def get_dependency_blast_radius(  # noqa: C901
         if source:
             lines.append(f"    Data sources:     {source}")
 
+        # Known CVEs from OSV (direct package queries only)
+        osv_vulns: list[dict[str, Any]] = r.get("osv_vulns") or []
+        if osv_vulns:
+            ver_scope = f"affecting @{direct_version}" if direct_version else "(all versions)"
+            lines.append(f"    Known CVEs (OSV) {ver_scope}: {len(osv_vulns)}")
+            for vuln in osv_vulns:
+                vid = vuln.get("id", "?")
+                vsummary = (vuln.get("summary") or "")[:80]
+                # Show CVE alias if the primary id is a GHSA/advisory record
+                cve_aliases = [a for a in (vuln.get("aliases") or []) if str(a).startswith("CVE-")]
+                alias_str = f" [{cve_aliases[0]}]" if cve_aliases else ""
+                fixed_str = f"  → fixed: {vuln['fixed']}" if vuln.get("fixed") else ""
+                lines.append(f"      • {vid}{alias_str}: {vsummary}{fixed_str}")
+        elif is_direct_package:
+            # We queried OSV but found nothing — let user know (not an error)
+            lines.append("    Known CVEs (OSV): none found")
+
         sections.extend(lines)
 
     # Summary line
@@ -578,5 +735,10 @@ def get_dependency_blast_radius(  # noqa: C901
             sections.append(f"         Total weekly downloads across all packages: {total_weekly:,}")
         if total_dependents:
             sections.append(f"         Total npm dependent packages: {total_dependents:,}")
+        # Summarise OSV CVE exposure for direct queries
+        if is_direct_package:
+            total_osv = sum(len(r.get("osv_vulns") or []) for r in enriched_results)
+            version_note = f" affecting version {direct_version}" if direct_version else ""
+            sections.append(f"         Known CVEs from OSV{version_note}: {total_osv}")
 
     return "\n".join(sections)
