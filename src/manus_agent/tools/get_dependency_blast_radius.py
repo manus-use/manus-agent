@@ -14,18 +14,22 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Anaconda API      — conda-forge / defaults channel metadata + total
+                         download counts (conda only; no auth required)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
 
 CLI: ``manus-agent blast-radius requests@2.28.0``
      ``manus-agent blast-radius CVE-2021-44228``
+     ``manus-agent blast-radius conda:numpy@1.26.0``
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -51,6 +55,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_ANACONDA_PKG_URL = "https://api.anaconda.org/package/{channel}/{name}"
+_ANACONDA_CHANNELS = ("conda-forge", "anaconda")
 
 _TIMEOUT = 20
 
@@ -66,6 +72,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "conda": "conda (Anaconda/conda-forge)",
 }
 
 
@@ -373,6 +380,94 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Conda enrichment helper
+# ---------------------------------------------------------------------------
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _parse_anaconda_timestamp(ts: str) -> datetime | None:
+    """Parse an Anaconda API timestamp string into a UTC-aware datetime.
+
+    Handles the format returned by ``api.anaconda.org``:
+    ``"2016-04-20 07:41:54.299000+00:00"``
+    """
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace(" ", "T")).astimezone(timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def _enrich_conda(name: str) -> dict[str, Any]:
+    """Fetch conda-forge (or Anaconda defaults) metadata for *name*.
+
+    Makes a single ``GET https://api.anaconda.org/package/{channel}/{name}``
+    request, trying ``conda-forge`` first then falling back to the ``anaconda``
+    defaults channel.  Extracts:
+
+    * ``total_downloads``   — cumulative all-time download counter (``ndownloads``)
+    * ``weekly_downloads``  — rolling weekly average (``total_downloads // 52``;
+                               Anaconda exposes no per-week endpoint)
+    * ``latest_version``    — current stable release
+    * ``total_versions``    — number of distinct versions published
+    * ``first_release_date`` / ``age_years`` — derived from the oldest
+                               ``upload_time`` across all published files
+    * ``description``       — package summary (truncated to 120 chars)
+    * ``license``           — SPDX license expression
+    * ``home_page``         — upstream project URL
+    * ``conda_page``        — Anaconda.org HTML page URL
+    """
+    result: dict[str, Any] = {"ecosystem": "conda", "package_name": name}
+    for channel in _ANACONDA_CHANNELS:
+        url = _ANACONDA_PKG_URL.format(channel=channel, name=name)
+        try:
+            data = _get(url)
+        except Exception as exc:
+            logger.debug("Anaconda enrich failed for %s/%s: %s", channel, name, exc)
+            continue  # try next channel
+
+        # --- download counts ------------------------------------------------
+        total_dl = data.get("ndownloads") or 0
+        result["total_downloads"] = total_dl
+        # weekly_downloads proxy: all-time / 52 weeks per year rolling average
+        result["weekly_downloads"] = int(total_dl // 52) if total_dl else None
+
+        # --- version metadata -----------------------------------------------
+        result["latest_version"] = data.get("latest_version") or ""
+        versions = data.get("versions") or []
+        result["total_versions"] = len(versions)
+
+        # --- first release date from file upload timestamps -----------------
+        files = data.get("files") or []
+        file_times = [_parse_anaconda_timestamp(f["upload_time"]) for f in files if f.get("upload_time")]
+        valid_times = [t for t in file_times if t is not None]
+        if valid_times:
+            first_dt = min(valid_times)
+            result["first_release_date"] = first_dt.strftime("%Y-%m-%d")
+            age_years = (datetime.now(timezone.utc) - first_dt).days / 365.25
+            result["age_years"] = round(age_years, 1)
+
+        # --- package metadata -----------------------------------------------
+        summary = (data.get("summary") or "").replace("\n", " ").strip()
+        if summary:
+            result["description"] = summary[:120]
+        if data.get("license"):
+            result["license"] = data["license"]
+        if data.get("home"):
+            result["home_page"] = data["home"]
+        if data.get("html_url"):
+            result["conda_page"] = data["html_url"]
+
+        result["channel"] = channel
+        return result  # success — no need to try fallback channel
+
+    # All channels failed — return minimal stub
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +477,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("conda", "conda-forge", "anaconda"):
+        return _enrich_conda(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -433,6 +530,8 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **conda**: total + estimated weekly downloads from Anaconda API
+         (conda-forge channel first, then Anaconda defaults)
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -440,9 +539,12 @@ def get_dependency_blast_radius(  # noqa: C901
     the single vulnerable package.
 
     Args:
-        package_or_cve: Package spec (``name@version``, ``ecosystem:name@version``)
-                        or CVE ID (``CVE-YYYY-NNNN``).
-        max_packages:   Maximum number of packages to enrich with stats (default 10).
+        package_or_cve: Package spec (``name@version``,
+                        ``ecosystem:name@version``, e.g.
+                        ``conda:numpy@1.26.0``) or CVE ID
+                        (``CVE-YYYY-NNNN``).
+        max_packages:   Maximum number of packages to enrich with stats
+                        (default 10).
 
     Returns:
         A structured text report with per-package exposure stats and a
@@ -558,6 +660,28 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # conda-specific stats
+        if eco.lower() in ("conda", "conda-forge", "anaconda"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("total_downloads") is not None:
+                lines.append(f"    Total downloads:  {r['total_downloads']:,}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly avg (est): {r['weekly_downloads']:,}")
+            if r.get("first_release_date"):
+                age = f" ({r['age_years']}y ago)" if r.get("age_years") else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("license"):
+                lines.append(f"    License:          {r['license']}")
+            if r.get("home_page"):
+                lines.append(f"    Home page:        {r['home_page']}")
+            if r.get("conda_page"):
+                lines.append(f"    Conda page:       {r['conda_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
