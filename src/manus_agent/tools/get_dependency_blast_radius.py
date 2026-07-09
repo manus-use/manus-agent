@@ -14,6 +14,7 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. pub.dev API       — version list + popularity score (Pub/Dart/Flutter only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -51,6 +53,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_PUB_API_URL = "https://pub.dev/api/packages/{}"
+_PUB_SCORE_URL = "https://pub.dev/api/packages/{}/score"
 
 _TIMEOUT = 20
 
@@ -67,6 +71,13 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
 }
+
+# Pub popularity buckets → approximate weekly download estimate
+# The pub.dev popularityScore (0–1) is relative within the Dart ecosystem.
+# dart/http has ~100k pub points and ~popularityScore ~0.99.  We map score
+# to a rough weekly-download proxy so _blast_score works without a real
+# download metric (pub.dev does not expose raw download counts).
+_PUB_WEEKLY_ESTIMATE_SCALE = 200_000  # multiply popularityScore × this
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +359,87 @@ def _enrich_pypi(name: str) -> dict[str, Any]:
     return result
 
 
+def _parse_pub_timestamp(ts: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp from the pub.dev API into a UTC datetime."""
+    if not ts:
+        return None
+    # Normalise trailing Z → +00:00; remove sub-second precision beyond 6 digits
+    ts = ts.strip()
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    # Truncate sub-second to max 6 digits (Python's %f is µs)
+    if "." in ts:
+        dot_pos = ts.index(".")
+        # Find end of fractional part (before +/- offset or end of string)
+        end = dot_pos + 1
+        while end < len(ts) and ts[end].isdigit():
+            end += 1
+        frac = ts[dot_pos + 1 : end]
+        ts = ts[: dot_pos + 1] + frac[:6].ljust(6, "0") + ts[end:]
+    try:
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
+
+def _enrich_pub(name: str) -> dict[str, Any]:
+    """Fetch Dart/Flutter Pub package metadata and score."""
+    result: dict[str, Any] = {"ecosystem": "Pub", "package_name": name}
+
+    # Call 1: package metadata (version list, publisher, description, homepage)
+    try:
+        pkg_data = _get(_PUB_API_URL.format(name))
+        versions = pkg_data.get("versions", [])
+        result["total_versions"] = len(versions)
+        if versions:
+            # Latest version is the last entry in the list (pub.dev orders asc)
+            result["latest_version"] = versions[-1].get("version", "")
+            # First release is the earliest entry
+            first_ts = None
+            for v in versions:
+                candidate = v.get("published", "")
+                if candidate:
+                    first_ts = candidate
+                    break
+            if first_ts:
+                first_dt = _parse_pub_timestamp(first_ts)
+                if first_dt:
+                    result["first_release_date"] = first_dt.strftime("%Y-%m-%d")
+                    now = datetime.now(timezone.utc)
+                    result["age_years"] = round((now - first_dt).days / 365.25, 1)
+        # Top-level metadata
+        latest = pkg_data.get("latest", {})
+        pubspec = latest.get("pubspec", {})
+        desc = (pubspec.get("description") or "").strip().replace("\n", " ")
+        if desc:
+            result["description"] = desc[:120]
+        memberships = pkg_data.get("publisherMemberships", [])
+        if memberships:
+            result["publisher"] = memberships[0].get("publisherName", "")
+        result["pub_page"] = f"https://pub.dev/packages/{name}"
+    except Exception as exc:
+        logger.debug("Pub package fetch failed for %s: %s", name, exc)
+
+    # Call 2: popularity score (separate endpoint)
+    try:
+        score_data = _get(_PUB_SCORE_URL.format(name))
+        popularity = score_data.get("popularityScore")  # float 0–1
+        if popularity is not None:
+            result["popularity_score"] = round(float(popularity), 4)
+            # Derive a weekly-download proxy for _blast_score
+            result["weekly_downloads"] = int(float(popularity) * _PUB_WEEKLY_ESTIMATE_SCALE)
+        result["like_count"] = score_data.get("likeCount", 0)
+        result["pub_points"] = score_data.get("grantedPoints", 0)
+        result["max_pub_points"] = score_data.get("maxPoints", 0)
+    except Exception as exc:
+        logger.debug("Pub score fetch failed for %s: %s", name, exc)
+
+    return result
+
+
 def _enrich_maven(name: str) -> dict[str, Any]:
     """Fetch Maven Central artifact metadata."""
     result: dict[str, Any] = {"ecosystem": "Maven", "package_name": name}
@@ -382,6 +474,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("pub", "dart", "flutter"):
+        return _enrich_pub(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -438,6 +532,9 @@ def get_dependency_blast_radius(  # noqa: C901
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
     to a vulnerability — the answer is often orders of magnitude larger than
     the single vulnerable package.
+
+    Supported ecosystems: npm, PyPI, Maven, Pub (Dart/Flutter).
+    Other ecosystems are still reported but without enriched download stats.
 
     Args:
         package_or_cve: Package spec (``name@version``, ``ecosystem:name@version``)
@@ -558,6 +655,28 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Pub (Dart/Flutter)-specific stats
+        if eco.lower() in ("pub", "dart", "flutter"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("popularity_score") is not None:
+                lines.append(f"    Popularity score: {r['popularity_score']:.4f} (pub.dev 0–1)")
+            if r.get("like_count") is not None:
+                lines.append(f"    Pub likes:        {r['like_count']:,}")
+            if r.get("pub_points") is not None and r.get("max_pub_points"):
+                lines.append(f"    Pub points:       {r['pub_points']}/{r['max_pub_points']}")
+            if r.get("first_release_date"):
+                age = f" ({r['age_years']}y old)" if r.get("age_years") is not None else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("publisher"):
+                lines.append(f"    Publisher:        {r['publisher']}")
+            if r.get("pub_page"):
+                lines.append(f"    Pub page:         {r['pub_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
