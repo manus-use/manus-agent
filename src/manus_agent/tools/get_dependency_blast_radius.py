@@ -51,6 +51,8 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_CRANDB_URL = "https://crandb.r-pkg.org/{}/all"
+_CRANLOGS_URL = "https://cranlogs.r-pkg.org/downloads/total/last-month/{}"
 
 _TIMEOUT = 20
 
@@ -66,6 +68,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "CRAN": "CRAN (R)",
 }
 
 
@@ -373,6 +376,86 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+
+
+def _parse_cran_timestamp(ts: str) -> str:
+    """Normalise a CRAN/crandb ISO-8601 timestamp to ``YYYY-MM-DD``.
+
+    crandb returns timestamps like ``"2014-10-21T08:27:55+00:00"`` and
+    occasionally ``"2014-10-21T08:27:55Z"``.
+    """
+    if not ts:
+        return ""
+    # Trim to the date portion only -- first 10 characters are always YYYY-MM-DD.
+    return ts[:10]
+
+
+def _enrich_cran(name: str) -> dict[str, Any]:
+    """Fetch CRAN package metadata + download statistics.
+
+    Data sources:
+
+    - ``crandb.r-pkg.org/{name}/all``  -- version timeline, reverse-dependency
+      count (``revdeps``), latest version, package title, archived flag.
+    - ``cranlogs.r-pkg.org/downloads/total/last-month/{name}`` -- last-30-day
+      download total from the RStudio CRAN mirror log aggregate (the canonical
+      public source used by all CRAN mirrors).
+
+    Download signal:
+
+    - ``monthly_downloads``  = last-month count from cranlogs.
+    - ``weekly_downloads``   = monthly_downloads // 4  (estimated; no per-week
+      CRAN endpoint exists; integer division avoids fractional counts).
+
+    ``dependent_packages_count`` is set to ``revdeps`` so the shared
+    ``_blast_score`` function works without modification.
+
+    No authentication required; both endpoints are freely accessible.
+    """
+    result: dict[str, Any] = {"ecosystem": "CRAN", "package_name": name}
+
+    # --- call 1: crandb metadata ---
+    try:
+        data = _get(_CRANDB_URL.format(name))
+        result["latest_version"] = data.get("latest", "")
+        result["title"] = (data.get("title") or "")[:120]
+        result["archived"] = bool(data.get("archived", False))
+        result["dependent_packages_count"] = int(data.get("revdeps") or 0)
+
+        timeline = data.get("timeline") or {}
+        total_versions = len(timeline)
+        result["total_versions"] = total_versions
+
+        if total_versions > 0:
+            versions_sorted = list(timeline.keys())
+            first_ts = timeline.get(versions_sorted[0], "")
+            result["first_release_date"] = _parse_cran_timestamp(first_ts)
+            if result["first_release_date"]:
+                try:
+                    from datetime import date, datetime
+
+                    first_dt = datetime.strptime(result["first_release_date"], "%Y-%m-%d").date()
+                    age_days = (date.today() - first_dt).days
+                    result["age_years"] = round(age_days / 365.25, 1)
+                except (ValueError, OverflowError):
+                    pass
+
+        result["cran_page"] = f"https://cran.r-project.org/package={name}"
+    except Exception as exc:
+        logger.debug("CRAN crandb enrich failed for %s: %s", name, exc)
+
+    # --- call 2: cranlogs download counts ---
+    try:
+        logs = _get(_CRANLOGS_URL.format(name))
+        if isinstance(logs, list) and logs:
+            monthly = int(logs[0].get("downloads") or 0)
+            result["monthly_downloads"] = monthly
+            result["weekly_downloads"] = monthly // 4
+    except Exception as exc:
+        logger.debug("CRAN cranlogs enrich failed for %s: %s", name, exc)
+
+    return result
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +465,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("cran", "r"):
+        return _enrich_cran(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -534,12 +619,13 @@ def get_dependency_blast_radius(  # noqa: C901
             lines.append(f"    Vulnerable range: {ver_range}")
 
         # npm-specific stats
-        if "dependent_packages_count" in r:
-            lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
-        if r.get("weekly_downloads") is not None:
-            lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
-        if r.get("monthly_downloads") is not None:
-            lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
+        if eco.lower() in ("npm", "javascript", "node"):
+            if "dependent_packages_count" in r:
+                lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
 
         # PyPI-specific stats
         if eco.lower() in ("pypi", "python"):
@@ -549,6 +635,10 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Total releases:   {r['release_count']}")
             if r.get("description"):
                 lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
 
         # Maven-specific stats
         if eco.lower() in ("maven", "java"):
@@ -558,6 +648,26 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # CRAN-specific stats
+        if eco.lower() in ("cran", "r"):
+            if r.get("title"):
+                lines.append(f"    Title:            {r['title'][:80]}")
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if "dependent_packages_count" in r:
+                lines.append(f"    Reverse deps:     {r['dependent_packages_count']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
+            if r.get("first_release_date"):
+                age = f"  ({r['age_years']}y old)" if r.get("age_years") else ""
+                lines.append(f"    First release:    {r['first_release_date']}{age}")
+            if r.get("archived"):
+                lines.append("    Status:           ARCHIVED")
+            if r.get("cran_page"):
+                lines.append(f"    CRAN page:        {r['cran_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
