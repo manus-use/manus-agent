@@ -7,6 +7,7 @@ All external HTTP calls are mocked — no real network I/O.
 
 from __future__ import annotations
 
+import textwrap
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
     _blast_score,
+    _enrich_conan,
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
@@ -21,6 +23,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _parse_conan_config_yml,
     _parse_input,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
@@ -933,3 +936,480 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _parse_conan_config_yml
+# ===========================================================================
+
+
+class TestParseConanConfigYml:
+    """Tests for the minimal config.yml parser (no pyyaml dependency)."""
+
+    def _import(self):
+
+        return _parse_conan_config_yml
+
+    def test_parses_single_version_with_folder(self):
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            versions:
+              "3.4.1":
+                folder: "3.x.x"
+            """
+        )
+        result = fn(yml)
+        assert result == {"3.4.1": "3.x.x"}
+
+    def test_parses_multiple_versions(self):
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            versions:
+              "4.0.1":
+                folder: "4.x.x"
+              "3.6.3":
+                folder: "3.x.x"
+              "1.1.1w":
+                folder: "1.x.x"
+            """
+        )
+        result = fn(yml)
+        assert len(result) == 3
+        assert result["4.0.1"] == "4.x.x"
+        assert result["3.6.3"] == "3.x.x"
+        assert result["1.1.1w"] == "1.x.x"
+
+    def test_version_without_folder_defaults_to_all(self):
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            versions:
+              "1.3.2":
+            """
+        )
+        result = fn(yml)
+        assert result == {"1.3.2": "all"}
+
+    def test_single_version_folder_all(self):
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            versions:
+              "8.21.0":
+                folder: "all"
+            """
+        )
+        result = fn(yml)
+        assert result == {"8.21.0": "all"}
+
+    def test_empty_versions_returns_empty_dict(self):
+        fn = self._import()
+        result = fn("versions:\n")
+        assert result == {}
+
+    def test_empty_string_returns_empty_dict(self):
+        fn = self._import()
+        result = fn("")
+        assert result == {}
+
+    def test_comment_lines_ignored(self):
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            # This is a comment
+            versions:
+              # Another comment
+              "2.0.0":
+                folder: "all"
+            """
+        )
+        result = fn(yml)
+        assert result == {"2.0.0": "all"}
+
+    def test_version_with_unquoted_folder(self):
+        """Should gracefully parse: folder: all (no quotes)."""
+        fn = self._import()
+        yml = textwrap.dedent(
+            """\
+            versions:
+              "1.0.0":
+                folder: "all"
+            """
+        )
+        result = fn(yml)
+        assert result["1.0.0"] == "all"
+
+    def test_returns_correct_type(self):
+        fn = self._import()
+        yml = 'versions:\n  "1.0.0":\n    folder: "all"\n'
+        result = fn(yml)
+        assert isinstance(result, dict)
+        assert all(isinstance(k, str) for k in result)
+        assert all(isinstance(v, str) for v in result.values())
+
+
+# ===========================================================================
+# _enrich_conan
+# ===========================================================================
+
+
+
+_SAMPLE_CONFIG_YML = textwrap.dedent(
+    """\
+    versions:
+      "4.0.1":
+        folder: "4.x.x"
+      "3.6.3":
+        folder: "3.x.x"
+      "3.0.15":
+        folder: "3.x.x"
+    """
+)
+
+_SAMPLE_CONANFILE_PY = textwrap.dedent(
+    """\
+    from conan import ConanFile
+
+    class OpenSSLConan(ConanFile):
+        name = "openssl"
+        description = "A toolkit for the Transport Layer Security (TLS) and Secure Sockets Layer (SSL) protocols"
+        license = "Apache-2.0"
+        url = "https://github.com/conan-io/conan-center-index"
+        homepage = "https://github.com/openssl/openssl"
+    """
+)
+
+
+def _make_conan_mock(config_text: str, conanfile_text: str):
+    """Return a requests.get mock that returns config.yml then conanfile.py."""
+    config_resp = MagicMock()
+    config_resp.status_code = 200
+    config_resp.text = config_text
+    config_resp.raise_for_status = MagicMock()
+
+    conanfile_resp = MagicMock()
+    conanfile_resp.status_code = 200
+    conanfile_resp.text = conanfile_text
+    conanfile_resp.raise_for_status = MagicMock()
+
+    return MagicMock(side_effect=[config_resp, conanfile_resp])
+
+
+class TestEnrichConan:
+    """Tests for _enrich_conan."""
+
+    def _import(self):
+
+        return _enrich_conan
+
+    def test_basic_fields_populated(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["ecosystem"] == "ConanCenter"
+        assert result["package_name"] == "openssl"
+
+    def test_latest_version_extracted(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["latest_version"] == "4.0.1"
+
+    def test_total_versions_counted(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["total_versions"] == 3
+
+    def test_description_extracted(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert "TLS" in result["description"] or "SSL" in result["description"]
+
+    def test_license_extracted(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["license"] == "Apache-2.0"
+
+    def test_homepage_extracted(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["homepage"] == "https://github.com/openssl/openssl"
+
+    def test_conan_page_url_set(self):
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert "openssl" in result["conan_page"]
+        assert result["conan_page"].startswith("https://")
+
+    def test_weekly_downloads_not_set(self):
+        """ConanCenter has no download stats; weekly_downloads must be absent or None."""
+        _enrich_conan = self._import()
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=_make_conan_mock(_SAMPLE_CONFIG_YML, _SAMPLE_CONANFILE_PY),
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result.get("weekly_downloads") is None
+
+    def test_config_fetch_failure_returns_minimal(self):
+        """If the first HTTP call fails, return a minimal stub."""
+        _enrich_conan = self._import()
+        import requests as _req
+
+        err_resp = MagicMock()
+        err_resp.raise_for_status.side_effect = _req.exceptions.HTTPError("404")
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            return_value=err_resp,
+        ):
+            result = _enrich_conan("nonexistent-pkg")
+
+        assert result["ecosystem"] == "ConanCenter"
+        assert result["package_name"] == "nonexistent-pkg"
+        assert "latest_version" not in result
+
+    def test_conanfile_fetch_failure_still_returns_versions(self):
+        """If the second HTTP call fails, version info should still be present."""
+        _enrich_conan = self._import()
+        import requests as _req
+
+        config_resp = MagicMock()
+        config_resp.text = _SAMPLE_CONFIG_YML
+        config_resp.raise_for_status = MagicMock()
+
+        err_resp = MagicMock()
+        err_resp.raise_for_status.side_effect = _req.exceptions.HTTPError("404")
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=[config_resp, err_resp],
+        ):
+            result = _enrich_conan("openssl")
+
+        assert result["latest_version"] == "4.0.1"
+        assert result["total_versions"] == 3
+        assert "description" not in result
+
+    def test_empty_config_yml_returns_early(self):
+        """Empty config.yml (no versions) returns minimal stub."""
+        _enrich_conan = self._import()
+
+        config_resp = MagicMock()
+        config_resp.text = "versions:\n"
+        config_resp.raise_for_status = MagicMock()
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            return_value=config_resp,
+        ):
+            result = _enrich_conan("empty-pkg")
+
+        assert result["ecosystem"] == "ConanCenter"
+        assert "latest_version" not in result
+
+    def test_single_version_folder_all(self):
+        """Packages with folder='all' should work correctly."""
+        _enrich_conan = self._import()
+        config_yml = "versions:\n  \"8.21.0\":\n    folder: \"all\"\n"
+        conanfile = '    description = "An easy-to-use client-side URL transfer library"\n    license = "curl"\n    homepage = "https://curl.se"\n'
+
+        config_resp = MagicMock()
+        config_resp.text = config_yml
+        config_resp.raise_for_status = MagicMock()
+
+        conanfile_resp = MagicMock()
+        conanfile_resp.text = conanfile
+        conanfile_resp.raise_for_status = MagicMock()
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=[config_resp, conanfile_resp],
+        ):
+            result = _enrich_conan("libcurl")
+
+        assert result["latest_version"] == "8.21.0"
+        assert result["total_versions"] == 1
+        assert result["license"] == "curl"
+
+    def test_description_truncated_at_120(self):
+        """Description longer than 120 chars must be capped."""
+        _enrich_conan = self._import()
+        long_desc = "A " + "very " * 50 + "long description"
+        conanfile = f'    description = "{long_desc}"\n    license = "MIT"\n    homepage = "https://example.com"\n'
+
+        config_resp = MagicMock()
+        config_resp.text = _SAMPLE_CONFIG_YML
+        config_resp.raise_for_status = MagicMock()
+
+        cf_resp = MagicMock()
+        cf_resp.text = conanfile
+        cf_resp.raise_for_status = MagicMock()
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius.requests.get",
+            side_effect=[config_resp, cf_resp],
+        ):
+            result = _enrich_conan("big-pkg")
+
+        assert len(result["description"]) <= 120
+
+
+# ===========================================================================
+# _enrich_package dispatch — ConanCenter
+# ===========================================================================
+
+
+class TestEnrichPackageConanDispatch:
+    """Verify _enrich_package routes ConanCenter / conan / c / c++ → _enrich_conan."""
+
+    def _call(self, ecosystem: str, name: str = "openssl") -> dict:
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_conan",
+            return_value={"ecosystem": "ConanCenter", "package_name": name},
+        ) as mock_conan:
+            result = _enrich_package(name, ecosystem)
+            mock_conan.assert_called_once_with(name)
+        return result
+
+    def test_dispatch_conancenter(self):
+        r = self._call("ConanCenter")
+        assert r["ecosystem"] == "ConanCenter"
+
+    def test_dispatch_conan_lowercase(self):
+        r = self._call("conan")
+        assert r["ecosystem"] == "ConanCenter"
+
+    def test_dispatch_cpp(self):
+        r = self._call("c++")
+        assert r["ecosystem"] == "ConanCenter"
+
+    def test_dispatch_cpp_alt(self):
+        r = self._call("cpp")
+        assert r["ecosystem"] == "ConanCenter"
+
+    def test_dispatch_c(self):
+        r = self._call("c")
+        assert r["ecosystem"] == "ConanCenter"
+
+    def test_no_dispatch_for_pypi(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_conan",
+        ) as mock_conan:
+            _enrich_package("requests", "PyPI")
+            mock_conan.assert_not_called()
+
+    def test_no_dispatch_for_npm(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_conan",
+        ) as mock_conan:
+            _enrich_package("lodash", "npm")
+            mock_conan.assert_not_called()
+
+
+# ===========================================================================
+# get_dependency_blast_radius — ConanCenter end-to-end
+# ===========================================================================
+
+
+class TestGetDependencyBlastRadiusConan:
+    """End-to-end tests with ConanCenter ecosystem packages."""
+
+    def test_direct_conan_package_contains_ecosystem_label(self):
+        """blast-radius for a direct conan: spec should mention C/C++."""
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        conan_result = {
+            "ecosystem": "ConanCenter",
+            "package_name": "openssl",
+            "latest_version": "4.0.1",
+            "total_versions": 7,
+            "description": "A toolkit for TLS and SSL protocols",
+            "license": "Apache-2.0",
+            "homepage": "https://github.com/openssl/openssl",
+            "conan_page": "https://conan.io/center/recipes/openssl",
+        }
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value={**conan_result, "version_range": "all", "source": "direct", "blast_radius": "UNKNOWN"},
+        ):
+            result = get_dependency_blast_radius("conan:openssl")
+
+        assert "openssl" in result
+        assert "ConanCenter" in result or "C/C++" in result
+
+    def test_blast_score_unknown_without_downloads(self):
+        """With no weekly_downloads, blast_score must return UNKNOWN."""
+        from manus_agent.tools.get_dependency_blast_radius import _blast_score
+
+        result = _blast_score({"ecosystem": "ConanCenter", "package_name": "openssl"})
+        assert result == "UNKNOWN"
+
+    def test_conan_output_shows_version_info(self):
+        """Output report should include version and description for ConanCenter packages."""
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        conan_result = {
+            "ecosystem": "ConanCenter",
+            "package_name": "zlib",
+            "latest_version": "1.3.2",
+            "total_versions": 1,
+            "description": "A massively spiffy yet delicately unobtrusive compression library",
+            "license": "Zlib",
+            "homepage": "https://zlib.net",
+            "conan_page": "https://conan.io/center/recipes/zlib",
+            "version_range": "all",
+            "source": "direct",
+            "blast_radius": "UNKNOWN",
+        }
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=conan_result,
+        ):
+            result = get_dependency_blast_radius("conan:zlib")
+
+        assert "zlib" in result.lower() or "Zlib" in result

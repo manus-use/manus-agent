@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. ConanCenter index — version list + conanfile metadata (Conan/C++ only;
+                         uses conan-io/conan-center-index on GitHub raw API)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +53,15 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_CONAN_CONFIG_URL = (
+    "https://raw.githubusercontent.com/conan-io/conan-center-index"
+    "/master/recipes/{name}/config.yml"
+)
+_CONAN_CONANFILE_URL = (
+    "https://raw.githubusercontent.com/conan-io/conan-center-index"
+    "/master/recipes/{name}/{folder}/conanfile.py"
+)
+_CONAN_PAGE_URL = "https://conan.io/center/recipes/{name}"
 
 _TIMEOUT = 20
 
@@ -66,6 +77,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "ConanCenter": "ConanCenter (C/C++)",
 }
 
 
@@ -373,6 +385,110 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Minimal config.yml parser (avoids pyyaml dependency)
+# ---------------------------------------------------------------------------
+
+
+def _parse_conan_config_yml(text: str) -> dict[str, Any]:
+    """
+    Parse the minimal ``config.yml`` format used by conan-center-index.
+
+    The file looks like::
+
+        versions:
+          "3.4.1":
+            folder: "3.x.x"
+          "2.1.0":
+            folder: "all"
+
+    Returns a dict ``{version: folder}`` mapping.
+    No external YAML dependency needed.
+    """
+    versions: dict[str, str] = {}
+    current_ver: str | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip()
+        # Match a quoted version key: '  "3.4.1":'
+        ver_m = re.match(r'^\s+"([^"]+)":\s*$', line)
+        if ver_m:
+            current_ver = ver_m.group(1)
+            versions[current_ver] = "all"  # default folder
+            continue
+        # Match folder line: '    folder: "3.x.x"'
+        if current_ver is not None:
+            folder_m = re.match(r'^\s+folder:\s*"([^"]+)"', line)
+            if folder_m:
+                versions[current_ver] = folder_m.group(1)
+    return versions
+
+
+# ---------------------------------------------------------------------------
+
+
+def _enrich_conan(name: str) -> dict[str, Any]:
+    """
+    Fetch ConanCenter package metadata from the conan-center-index GitHub repo.
+
+    Two unauthenticated raw-GitHub calls:
+
+    1. ``recipes/{name}/config.yml`` — version list → latest_version,
+       total_versions, and the latest recipe folder name.
+    2. ``recipes/{name}/{folder}/conanfile.py`` — regex-extract description,
+       license, and homepage from the recipe file.
+
+    Download counts are not available from ConanCenter's public APIs;
+    weekly_downloads is set to ``None`` so the blast-radius scorer returns
+    "UNKNOWN" (honest) rather than an inflated estimate.
+
+    Args:
+        name: Package name as it appears in ConanCenter (e.g. ``openssl``).
+
+    Returns:
+        Dict with keys: ecosystem, package_name, latest_version,
+        total_versions, description, license, homepage, conan_page.
+    """
+    result: dict[str, Any] = {
+        "ecosystem": "ConanCenter",
+        "package_name": name,
+        "conan_page": _CONAN_PAGE_URL.format(name=name),
+    }
+
+    # --- Call 1: config.yml → version list ---
+    try:
+        config_url = _CONAN_CONFIG_URL.format(name=name)
+        config_resp = requests.get(config_url, timeout=_TIMEOUT)
+        config_resp.raise_for_status()
+        versions_map = _parse_conan_config_yml(config_resp.text)
+        if not versions_map:
+            return result
+
+        # Sort versions (simple lexicographic; good enough for display)
+        sorted_versions = sorted(versions_map.keys(), reverse=True)
+        result["total_versions"] = len(sorted_versions)
+        result["latest_version"] = sorted_versions[0]
+        latest_folder = versions_map[sorted_versions[0]]
+    except Exception as exc:
+        logger.debug("ConanCenter config.yml fetch failed for %s: %s", name, exc)
+        return result
+
+    # --- Call 2: conanfile.py → description / license / homepage ---
+    try:
+        conanfile_url = _CONAN_CONANFILE_URL.format(name=name, folder=latest_folder)
+        cf_resp = requests.get(conanfile_url, timeout=_TIMEOUT)
+        cf_resp.raise_for_status()
+        conanfile_text = cf_resp.text
+
+        for field in ("description", "license", "homepage"):
+            m = re.search(r'(?m)^\s+' + field + r'\s*=\s*"([^"]+)"', conanfile_text)
+            if m:
+                result[field] = m.group(1)[:120]
+    except Exception as exc:
+        logger.debug("ConanCenter conanfile.py fetch failed for %s/%s: %s", name, latest_folder, exc)
+
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +498,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("conancenter", "conan", "c", "c++", "cpp"):
+        return _enrich_conan(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -558,6 +676,21 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # ConanCenter-specific stats
+        if eco.lower() in ("conancenter", "conan"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("license"):
+                lines.append(f"    License:          {r['license']}")
+            if r.get("homepage"):
+                lines.append(f"    Homepage:         {r['homepage']}")
+            if r.get("conan_page"):
+                lines.append(f"    ConanCenter page: {r['conan_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
