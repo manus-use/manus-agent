@@ -2,7 +2,7 @@
 Tests for src/manus_agent/tools/get_dependency_blast_radius.py
 
 All external HTTP calls are mocked — no real network I/O.
-100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central.
+100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central, CRAN (crandb + cranlogs).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
     _blast_score,
+    _enrich_cran,
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
@@ -21,6 +22,7 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _parse_cran_timestamp,
     _parse_input,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
@@ -933,3 +935,445 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _parse_cran_timestamp
+# ===========================================================================
+
+
+class TestParseCranTimestamp:
+    """Unit tests for the CRAN ISO-8601 timestamp normaliser."""
+
+    def test_standard_iso_with_offset(self):
+        assert _parse_cran_timestamp("2014-10-21T08:27:55+00:00") == "2014-10-21"
+
+    def test_standard_iso_with_z(self):
+        assert _parse_cran_timestamp("2022-03-15T12:00:00Z") == "2022-03-15"
+
+    def test_date_only(self):
+        assert _parse_cran_timestamp("2020-01-01") == "2020-01-01"
+
+    def test_empty_string_returns_empty(self):
+        assert _parse_cran_timestamp("") == ""
+
+    def test_none_like_empty(self):
+        # The caller guards with ``or ""``, but double-check the function itself.
+        assert _parse_cran_timestamp("") == ""
+
+    def test_preserves_only_date_portion(self):
+        ts = "2019-07-04T23:59:59+05:30"
+        result = _parse_cran_timestamp(ts)
+        assert result == "2019-07-04"
+        assert len(result) == 10
+
+
+# ===========================================================================
+# _enrich_cran
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Fixture helpers
+# ---------------------------------------------------------------------------
+
+def _make_crandb_response(
+    name: str = "ggplot2",
+    latest: str = "3.4.0",
+    revdeps: int = 400,
+    timeline_count: int = 10,
+    title: str = "Create Elegant Data Visualisations",
+    archived: bool = False,
+) -> dict:
+    """Return a minimal crandb /all response."""
+    timeline = {}
+    base_year = 2015
+    for i in range(timeline_count):
+        key = f"1.{i}"
+        timeline[key] = f"{base_year + i}-01-01T00:00:00+00:00"
+    return {
+        "_id": name,
+        "name": name,
+        "latest": latest,
+        "title": title,
+        "revdeps": revdeps,
+        "archived": archived,
+        "timeline": timeline,
+    }
+
+
+def _make_cranlogs_response(name: str = "ggplot2", downloads: int = 2_500_000) -> list:
+    """Return a minimal cranlogs downloads/total response."""
+    return [{"start": "2024-06-01", "end": "2024-06-30", "downloads": downloads, "package": name}]
+
+
+def _mock_cran_http(crandb_data: dict, cranlogs_data: list):
+    """Return a side_effect callable that routes GET requests to the right fixture."""
+    def side_effect(url, **kwargs):
+        mock = MagicMock()
+        mock.raise_for_status = MagicMock()
+        if "crandb.r-pkg.org" in url:
+            mock.json.return_value = crandb_data
+        elif "cranlogs.r-pkg.org" in url:
+            mock.json.return_value = cranlogs_data
+        else:
+            raise ValueError(f"Unexpected URL in CRAN mock: {url}")
+        return mock
+
+    return side_effect
+
+
+# ---------------------------------------------------------------------------
+# Happy-path tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichCranHappyPath:
+    """Tests for _enrich_cran when both APIs return expected data."""
+
+    def test_ecosystem_tag(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["ecosystem"] == "CRAN"
+
+    def test_package_name_preserved(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(name="dplyr"), _make_cranlogs_response(name="dplyr")
+        )):
+            result = _enrich_cran("dplyr")
+        assert result["package_name"] == "dplyr"
+
+    def test_latest_version_populated(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(latest="3.4.2"), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["latest_version"] == "3.4.2"
+
+    def test_revdeps_maps_to_dependent_packages_count(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(revdeps=512), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["dependent_packages_count"] == 512
+
+    def test_monthly_downloads_from_cranlogs(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), _make_cranlogs_response(downloads=3_000_000)
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["monthly_downloads"] == 3_000_000
+
+    def test_weekly_downloads_is_monthly_div_4(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), _make_cranlogs_response(downloads=4_000_000)
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["weekly_downloads"] == 1_000_000  # 4_000_000 // 4
+
+    def test_total_versions_count(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(timeline_count=25), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("ggplot2")
+        assert result["total_versions"] == 25
+
+    def test_first_release_date_populated(self):
+        crandb = _make_crandb_response(timeline_count=3)
+        # First key in timeline is "1.0", value is "2015-01-01T00:00:00+00:00"
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, _make_cranlogs_response())):
+            result = _enrich_cran("ggplot2")
+        assert result.get("first_release_date") == "2015-01-01"
+
+    def test_age_years_is_float(self):
+        crandb = _make_crandb_response(timeline_count=5)
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, _make_cranlogs_response())):
+            result = _enrich_cran("ggplot2")
+        assert isinstance(result.get("age_years"), float)
+        assert result["age_years"] > 0
+
+    def test_cran_page_url(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(name="openssl"), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("openssl")
+        assert result["cran_page"] == "https://cran.r-project.org/package=openssl"
+
+    def test_title_truncated_to_120_chars(self):
+        long_title = "A" * 200
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(title=long_title), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("pkg")
+        assert len(result["title"]) == 120
+
+    def test_archived_flag_true(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(archived=True), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("oldpkg")
+        assert result["archived"] is True
+
+    def test_archived_flag_false(self):
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(archived=False), _make_cranlogs_response()
+        )):
+            result = _enrich_cran("activepkg")
+        assert result["archived"] is False
+
+    def test_zero_downloads_still_sets_key(self):
+        """A package with 0 downloads should still set monthly/weekly keys."""
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), _make_cranlogs_response(downloads=0)
+        )):
+            result = _enrich_cran("zeropkg")
+        assert result["monthly_downloads"] == 0
+        assert result["weekly_downloads"] == 0
+
+    def test_weekly_integer_division(self):
+        """weekly_downloads should use integer (floor) division of monthly."""
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), _make_cranlogs_response(downloads=7)
+        )):
+            result = _enrich_cran("pkg")
+        # 7 // 4 == 1  (not 1.75)
+        assert result["weekly_downloads"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Degradation / failure mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichCranDegradation:
+    """Tests for _enrich_cran graceful degradation on API failure."""
+
+    def test_crandb_failure_returns_minimal_result(self):
+        """If crandb raises, we get ecosystem + package_name, no exception."""
+        def fail_crandb(url, **kwargs):
+            if "crandb" in url:
+                raise IOError("network error")
+            mock = MagicMock()
+            mock.raise_for_status = MagicMock()
+            mock.json.return_value = _make_cranlogs_response()
+            return mock
+
+        result = _enrich_cran("ggplot2")
+        # Just check it doesn't raise; ecosystem/name always present
+        with patch("requests.get", side_effect=fail_crandb):
+            result = _enrich_cran("ggplot2")
+        assert result["ecosystem"] == "CRAN"
+        assert result["package_name"] == "ggplot2"
+        assert "latest_version" not in result
+
+    def test_cranlogs_failure_does_not_populate_downloads(self):
+        """If cranlogs raises, monthly/weekly download keys should be absent."""
+        def fail_cranlogs(url, **kwargs):
+            if "cranlogs" in url:
+                raise IOError("network error")
+            mock = MagicMock()
+            mock.raise_for_status = MagicMock()
+            mock.json.return_value = _make_crandb_response()
+            return mock
+
+        with patch("requests.get", side_effect=fail_cranlogs):
+            result = _enrich_cran("ggplot2")
+        assert "monthly_downloads" not in result
+        assert "weekly_downloads" not in result
+
+    def test_empty_timeline_no_first_release(self):
+        """Empty timeline should not set first_release_date."""
+        crandb = _make_crandb_response(timeline_count=0)
+        crandb["timeline"] = {}
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, _make_cranlogs_response())):
+            result = _enrich_cran("freshpkg")
+        assert result["total_versions"] == 0
+        assert "first_release_date" not in result
+
+    def test_missing_revdeps_defaults_to_zero(self):
+        """revdeps absent from crandb response should default to 0."""
+        crandb = _make_crandb_response()
+        del crandb["revdeps"]
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, _make_cranlogs_response())):
+            result = _enrich_cran("pkg")
+        assert result["dependent_packages_count"] == 0
+
+    def test_null_revdeps_defaults_to_zero(self):
+        """revdeps=None in crandb response should coerce to 0."""
+        crandb = _make_crandb_response()
+        crandb["revdeps"] = None
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, _make_cranlogs_response())):
+            result = _enrich_cran("pkg")
+        assert result["dependent_packages_count"] == 0
+
+    def test_cranlogs_empty_list_does_not_set_downloads(self):
+        """Empty cranlogs list should not set monthly/weekly."""
+        with patch("requests.get", side_effect=_mock_cran_http(
+            _make_crandb_response(), []
+        )):
+            result = _enrich_cran("pkg")
+        assert "monthly_downloads" not in result
+
+    def test_both_apis_fail_returns_base_dict(self):
+        """Both APIs failing should still return a dict with ecosystem + package_name."""
+        with patch("requests.get", side_effect=IOError("all down")):
+            result = _enrich_cran("ggplot2")
+        assert result == {"ecosystem": "CRAN", "package_name": "ggplot2"}
+
+
+# ---------------------------------------------------------------------------
+# _enrich_package CRAN dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichPackageCranDispatch:
+    """Tests that _enrich_package correctly routes CRAN/R to _enrich_cran."""
+
+    def test_cran_ecosystem_lower(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_cran",
+            return_value={"ecosystem": "CRAN", "package_name": "ggplot2"},
+        ) as mock_cran:
+            result = _enrich_package("ggplot2", "cran")
+        mock_cran.assert_called_once_with("ggplot2")
+        assert result["ecosystem"] == "CRAN"
+
+    def test_cran_ecosystem_upper(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_cran",
+            return_value={"ecosystem": "CRAN", "package_name": "ggplot2"},
+        ) as mock_cran:
+            result = _enrich_package("ggplot2", "CRAN")
+        mock_cran.assert_called_once_with("ggplot2")
+
+    def test_r_ecosystem_lower(self):
+        """Ecosystem tag 'r' (as in OSV) should also dispatch to CRAN enricher."""
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_cran",
+            return_value={"ecosystem": "CRAN", "package_name": "jsonlite"},
+        ) as mock_cran:
+            result = _enrich_package("jsonlite", "r")
+        mock_cran.assert_called_once_with("jsonlite")
+
+    def test_r_ecosystem_upper(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_cran",
+            return_value={"ecosystem": "CRAN", "package_name": "jsonlite"},
+        ) as mock_cran:
+            _enrich_package("jsonlite", "R")
+        mock_cran.assert_called_once_with("jsonlite")
+
+    def test_unrelated_ecosystem_not_cran(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_cran"
+        ) as mock_cran:
+            _enrich_package("axios", "npm")
+        mock_cran.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Blast-radius scoring via CRAN stats
+# ---------------------------------------------------------------------------
+
+
+class TestBlastScoreWithCranData:
+    """Verify _blast_score integrates CRAN reverse-dependency counts correctly."""
+
+    def test_cran_high_revdeps_scores_critical(self):
+        stats = {"dependent_packages_count": 60_000, "weekly_downloads": 0}
+        assert _blast_score(stats) == "CRITICAL"
+
+    def test_cran_medium_revdeps_scores_high(self):
+        stats = {"dependent_packages_count": 6_000, "weekly_downloads": 0}
+        assert _blast_score(stats) == "HIGH"
+
+    def test_cran_low_revdeps_scores_medium(self):
+        stats = {"dependent_packages_count": 600, "weekly_downloads": 0}
+        assert _blast_score(stats) == "MEDIUM"
+
+    def test_cran_tiny_revdeps_scores_low(self):
+        stats = {"dependent_packages_count": 5, "weekly_downloads": 0}
+        assert _blast_score(stats) == "LOW"
+
+    def test_cran_zero_everything_unknown(self):
+        stats = {"dependent_packages_count": 0, "weekly_downloads": 0}
+        assert _blast_score(stats) == "UNKNOWN"
+
+    def test_weekly_downloads_lifted_from_monthly(self):
+        """weekly_downloads from monthly//4 should drive the score when revdeps are low."""
+        stats = {
+            "dependent_packages_count": 10,
+            "weekly_downloads": 600_000,  # > 500_000 threshold
+        }
+        assert _blast_score(stats) == "HIGH"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end integration: get_dependency_blast_radius with CRAN package
+# ---------------------------------------------------------------------------
+
+
+class TestGetDependencyBlastRadiusCran:
+    """Integration tests for the full tool output with CRAN packages."""
+
+    def _standard_cran_mocks(self):
+        """Return a side_effect that handles all GET calls for a CRAN direct query."""
+        crandb = _make_crandb_response(
+            name="openssl", latest="2.1.1", revdeps=150, timeline_count=20
+        )
+        cranlogs = _make_cranlogs_response(name="openssl", downloads=800_000)
+        return _mock_cran_http(crandb, cranlogs)
+
+    def test_output_contains_cran_label(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert "CRAN" in output or "cran" in output.lower()
+
+    def test_output_contains_package_name(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert "openssl" in output
+
+    def test_output_contains_blast_radius_label(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert any(label in output for label in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"))
+
+    def test_output_contains_reverse_deps_line(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert "150" in output or "Reverse deps" in output
+
+    def test_output_contains_monthly_downloads(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        # 800,000 monthly  ->  200,000 weekly
+        assert "800,000" in output or "800000" in output
+
+    def test_output_contains_cran_page_url(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert "cran.r-project.org" in output
+
+    def test_cran_archived_package_shows_status(self):
+        crandb = _make_crandb_response(name="archivedpkg", archived=True, revdeps=0)
+        cranlogs = _make_cranlogs_response(name="archivedpkg", downloads=0)
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, cranlogs)):
+            output = get_dependency_blast_radius("cran:archivedpkg")
+        assert "ARCHIVED" in output
+
+    def test_summary_line_present(self):
+        with patch("requests.get", side_effect=self._standard_cran_mocks()):
+            output = get_dependency_blast_radius("cran:openssl")
+        assert "Summary" in output
+
+    def test_r_ecosystem_alias_dispatches_to_cran(self):
+        """``r:pkg`` and ``cran:pkg`` should produce equivalent enrichment."""
+        crandb = _make_crandb_response(name="jsonlite")
+        cranlogs = _make_cranlogs_response(name="jsonlite")
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, cranlogs)):
+            output_cran = get_dependency_blast_radius("cran:jsonlite")
+        with patch("requests.get", side_effect=_mock_cran_http(crandb, cranlogs)):
+            output_r = get_dependency_blast_radius("r:jsonlite")
+        assert ("CRAN" in output_cran) and ("CRAN" in output_r)
