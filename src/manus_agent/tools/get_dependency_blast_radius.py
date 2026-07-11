@@ -14,6 +14,7 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Hackage API       — Haskell package metadata + reverse dependency count
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +52,10 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_HACKAGE_VERSIONS_URL = "https://hackage.haskell.org/package/{}.json"
+_HACKAGE_REVERSE_URL = "https://hackage.haskell.org/package/{}/reverse"
+_HACKAGE_CABAL_URL = "https://hackage.haskell.org/package/{}-{}/{}.cabal"
+_HACKAGE_PREFERRED_URL = "https://hackage.haskell.org/package/{}/preferred"
 
 _TIMEOUT = 20
 
@@ -66,6 +71,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "Hackage": "Hackage (Haskell)",
 }
 
 
@@ -373,6 +379,95 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _parse_hackage_latest(versions_json: dict[str, str]) -> str:
+    """Return the highest non-deprecated version from Hackage .json response.
+
+    The dict maps version-string → 'normal' | 'deprecated'.  We sort by
+    packaging.version if available, otherwise lexicographically, and prefer
+    'normal' over 'deprecated'.
+    """
+    normals = [v for v, status in versions_json.items() if status == "normal"]
+    candidates = normals or list(versions_json.keys())
+    if not candidates:
+        return ""
+    try:
+        from packaging.version import Version
+
+        return str(max(candidates, key=lambda v: Version(v)))
+    except Exception:
+        return sorted(candidates)[-1]
+
+
+def _scrape_hackage_reverse_count(name: str) -> int | None:
+    """Scrape the number of unique reverse dependencies from Hackage HTML.
+
+    The /package/{name}/reverse page lists packages that depend on *name*.
+    We count distinct /package/ hrefs, excluding the package itself.
+    Returns None on failure.
+    """
+    try:
+        r = requests.get(
+            _HACKAGE_REVERSE_URL.format(name),
+            timeout=_TIMEOUT,
+            headers={"Accept": "text/html"},
+        )
+        r.raise_for_status()
+        # Count distinct /package/<pkg> hrefs, exclude self-references
+        matches = set(re.findall(r'href="/package/([^/"]+)"', r.text))
+        matches.discard(name)
+        # Remove versioned duplicates like "pkg-1.2.3" which aren't package slugs
+        pure_slugs = {m for m in matches if not re.search(r"-\d", m.split("-")[-1])}
+        return len(pure_slugs) if pure_slugs else len(matches)
+    except Exception:
+        return None
+
+
+def _enrich_hackage(name: str) -> dict[str, Any]:  # noqa: C901
+    """Fetch Hackage package metadata for a Haskell package.
+
+    Data sources (all unauthenticated):
+    - ``/package/{name}.json``          — version list + deprecation status
+    - ``/package/{name}/reverse``       — reverse dependency count (HTML scrape)
+    - ``/package/{name}-{ver}/{name}.cabal`` — synopsis + homepage
+    """
+    result: dict[str, Any] = {"ecosystem": "Hackage", "package_name": name}
+    try:
+        # 1. Version list
+        versions_data: dict[str, str] = _get(_HACKAGE_VERSIONS_URL.format(name))
+        result["total_versions"] = len(versions_data)
+        latest = _parse_hackage_latest(versions_data)
+        if latest:
+            result["latest_version"] = latest
+            result["hackage_page"] = f"https://hackage.haskell.org/package/{name}"
+
+            # 2. Cabal file for synopsis + homepage
+            try:
+                cabal_url = _HACKAGE_CABAL_URL.format(name, latest, name)
+                cabal_r = requests.get(cabal_url, timeout=_TIMEOUT)
+                cabal_r.raise_for_status()
+                cabal_text = cabal_r.text
+                synopsis_match = re.search(r"^[Ss]ynopsis:\s*(.+)$", cabal_text, re.MULTILINE)
+                if synopsis_match:
+                    result["description"] = synopsis_match.group(1).strip()[:120]
+                homepage_match = re.search(r"^[Hh]omepage:\s*(\S+)", cabal_text, re.MULTILINE)
+                if homepage_match:
+                    result["home_page"] = homepage_match.group(1).strip()
+                category_match = re.search(r"^[Cc]ategory:\s*(.+)$", cabal_text, re.MULTILINE)
+                if category_match:
+                    result["category"] = category_match.group(1).strip()[:80]
+            except Exception as exc:
+                logger.debug("Hackage cabal fetch failed for %s: %s", name, exc)
+
+        # 3. Reverse dependency count (HTML scrape) → drives blast score
+        rev_count = _scrape_hackage_reverse_count(name)
+        if rev_count is not None:
+            result["dependent_packages_count"] = rev_count
+
+    except Exception as exc:
+        logger.debug("Hackage enrich failed for %s: %s", name, exc)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +477,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("hackage", "haskell", "cabal"):
+        return _enrich_hackage(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -433,6 +530,7 @@ def get_dependency_blast_radius(  # noqa: C901
        - **npm**: dependent package count + weekly/monthly download stats
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
+       - **Hackage**: reverse dependency count + package metadata
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
@@ -558,6 +656,23 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Hackage-specific stats
+        if eco.lower() in ("hackage", "haskell"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("dependent_packages_count") is not None:
+                lines.append(f"    Hackage rev-deps: {r['dependent_packages_count']:,}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("category"):
+                lines.append(f"    Category:         {r['category']}")
+            if r.get("home_page"):
+                lines.append(f"    Home page:        {r['home_page']}")
+            if r.get("hackage_page"):
+                lines.append(f"    Hackage page:     {r['hackage_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")

@@ -2,7 +2,7 @@
 Tests for src/manus_agent/tools/get_dependency_blast_radius.py
 
 All external HTTP calls are mocked — no real network I/O.
-100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central.
+100% mocked: NVD, OSV, GHSA, npm, PyPI, pypistats, Maven Central, Hackage.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import pytest
 
 from manus_agent.tools.get_dependency_blast_radius import (
     _blast_score,
+    _enrich_hackage,
     _enrich_maven,
     _enrich_npm,
     _enrich_package,
@@ -21,7 +22,9 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
+    _parse_hackage_latest,
     _parse_input,
+    _scrape_hackage_reverse_count,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
 )
@@ -886,6 +889,272 @@ class TestGetDependencyBlastRadius:
         ):
             result = get_dependency_blast_radius("CVE-2023-32681")
         assert "Python" in result or "PyPI" in result
+
+
+# ===========================================================================
+# _parse_hackage_latest
+# ===========================================================================
+
+
+class TestParseHackageLatest:
+    def test_returns_highest_normal_version(self):
+        versions = {"0.1": "normal", "0.9": "normal", "0.30": "normal"}
+        result = _parse_hackage_latest(versions)
+        assert result == "0.30"
+
+    def test_skips_deprecated_versions(self):
+        versions = {"0.29": "normal", "0.30": "deprecated"}
+        result = _parse_hackage_latest(versions)
+        assert result == "0.29"
+
+    def test_falls_back_to_deprecated_when_all_deprecated(self):
+        versions = {"0.1": "deprecated", "0.2": "deprecated"}
+        result = _parse_hackage_latest(versions)
+        # Should return some version rather than empty string
+        assert result in ("0.2", "0.1")
+
+    def test_empty_dict_returns_empty_string(self):
+        result = _parse_hackage_latest({})
+        assert result == ""
+
+    def test_single_version(self):
+        result = _parse_hackage_latest({"1.0.0": "normal"})
+        assert result == "1.0.0"
+
+    def test_multipart_versions_sorted_correctly(self):
+        versions = {"0.15": "normal", "0.15.1": "normal", "0.14": "normal"}
+        result = _parse_hackage_latest(versions)
+        assert result == "0.15.1"
+
+
+# ===========================================================================
+# _scrape_hackage_reverse_count
+# ===========================================================================
+
+
+class TestScrapeHackageReverseCount:
+    _REVERSE_HTML = """
+    <html><body>
+    <a href="/package/conduit">conduit</a>
+    <a href="/package/pipes">pipes</a>
+    <a href="/package/lens">lens</a>
+    <a href="/package/cryptonite">self-link</a>
+    </body></html>
+    """
+
+    def test_counts_unique_package_links(self):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.text = self._REVERSE_HTML
+        with patch("requests.get", return_value=mock_resp):
+            count = _scrape_hackage_reverse_count("cryptonite")
+        # conduit, pipes, lens (self-link excluded)
+        assert count == 3
+
+    def test_returns_none_on_http_error(self):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = Exception("404 Not Found")
+        with patch("requests.get", return_value=mock_resp):
+            count = _scrape_hackage_reverse_count("nonexistent-pkg")
+        assert count is None
+
+    def test_returns_none_on_connection_error(self):
+        with patch("requests.get", side_effect=Exception("connection refused")):
+            count = _scrape_hackage_reverse_count("some-pkg")
+        assert count is None
+
+    def test_returns_zero_for_no_deps(self):
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.text = "<html><body><p>No reverse dependencies.</p></body></html>"
+        with patch("requests.get", return_value=mock_resp):
+            count = _scrape_hackage_reverse_count("brand-new-pkg")
+        assert count == 0
+
+
+# ===========================================================================
+# _enrich_hackage
+# ===========================================================================
+
+
+class TestEnrichHackage:
+    _VERSIONS_JSON = {
+        "0.1": "normal",
+        "0.29": "normal",
+        "0.30": "normal",
+    }
+    _CABAL_TEXT = """
+Name:                cryptonite
+version:             0.30
+Synopsis:            Cryptography Primitives sink
+Category:            Cryptography
+Homepage:            https://github.com/haskell-crypto/cryptonite
+"""
+    _REVERSE_HTML = (
+        "<html><body>" + "".join(f'<a href="/package/dep-{i}">dep-{i}</a>\n' for i in range(42)) + "</body></html>"
+    )
+
+    def _make_responses(self):
+        """Return (versions_resp, cabal_resp, reverse_resp) mocks."""
+        versions_resp = MagicMock()
+        versions_resp.raise_for_status.return_value = None
+        versions_resp.json.return_value = self._VERSIONS_JSON
+
+        cabal_resp = MagicMock()
+        cabal_resp.raise_for_status.return_value = None
+        cabal_resp.text = self._CABAL_TEXT
+
+        reverse_resp = MagicMock()
+        reverse_resp.raise_for_status.return_value = None
+        reverse_resp.text = self._REVERSE_HTML
+
+        return versions_resp, cabal_resp, reverse_resp
+
+    def test_returns_full_metadata(self):
+        versions_resp, cabal_resp, reverse_resp = self._make_responses()
+        with patch("requests.get", side_effect=[versions_resp, cabal_resp, reverse_resp]):
+            result = _enrich_hackage("cryptonite")
+        assert result["ecosystem"] == "Hackage"
+        assert result["package_name"] == "cryptonite"
+        assert result["latest_version"] == "0.30"
+        assert result["total_versions"] == 3
+        assert "Cryptography Primitives" in result.get("description", "")
+        assert result["home_page"] == "https://github.com/haskell-crypto/cryptonite"
+        assert result["category"] == "Cryptography"
+        assert result["hackage_page"] == "https://hackage.haskell.org/package/cryptonite"
+        assert result["dependent_packages_count"] == 42
+
+    def test_dependent_count_drives_blast_score(self):
+        # 42 reverse deps → LOW (< 500)
+        result = {"dependent_packages_count": 42, "weekly_downloads": None}
+        assert _blast_score(result) == "LOW"
+
+    def test_medium_reverse_deps_score_medium(self):
+        # 600 reverse deps → MEDIUM (>= 500 and < 5000)
+        result = {"dependent_packages_count": 600, "weekly_downloads": None}
+        assert _blast_score(result) == "MEDIUM"
+
+    def test_high_reverse_deps_score_high(self):
+        result = {"dependent_packages_count": 6000}
+        assert _blast_score(result) == "HIGH"
+
+    def test_critical_reverse_deps(self):
+        result = {"dependent_packages_count": 60000}
+        assert _blast_score(result) == "CRITICAL"
+
+    def test_graceful_degradation_on_versions_error(self):
+        with patch("requests.get", side_effect=Exception("timeout")):
+            result = _enrich_hackage("cryptonite")
+        assert result["ecosystem"] == "Hackage"
+        assert result["package_name"] == "cryptonite"
+        assert "latest_version" not in result
+
+    def test_cabal_failure_does_not_abort(self):
+        versions_resp = MagicMock()
+        versions_resp.raise_for_status.return_value = None
+        versions_resp.json.return_value = self._VERSIONS_JSON
+
+        cabal_resp = MagicMock()
+        cabal_resp.raise_for_status.side_effect = Exception("404")
+
+        reverse_resp = MagicMock()
+        reverse_resp.raise_for_status.return_value = None
+        reverse_resp.text = "<html><body></body></html>"
+
+        with patch("requests.get", side_effect=[versions_resp, cabal_resp, reverse_resp]):
+            result = _enrich_hackage("some-pkg")
+        # Still populated with version info even when cabal fetch fails
+        assert result["latest_version"] == "0.30"
+        assert "description" not in result
+
+    def test_ecosystem_label_correct(self):
+        from manus_agent.tools.get_dependency_blast_radius import _ECOSYSTEM_LABEL
+
+        assert _ECOSYSTEM_LABEL.get("Hackage") == "Hackage (Haskell)"
+
+
+# ===========================================================================
+# _enrich_package dispatch — Hackage
+# ===========================================================================
+
+
+class TestEnrichPackageHackageDispatch:
+    def test_hackage_ecosystem_routes_to_enrich_hackage(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_hackage",
+            return_value={"ecosystem": "Hackage", "package_name": "cryptonite"},
+        ) as mock_enrich:
+            result = _enrich_package("cryptonite", "Hackage")
+        mock_enrich.assert_called_once_with("cryptonite")
+        assert result["ecosystem"] == "Hackage"
+
+    def test_haskell_alias_routes_to_enrich_hackage(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_hackage",
+            return_value={"ecosystem": "Hackage", "package_name": "text"},
+        ) as mock_enrich:
+            result = _enrich_package("text", "haskell")
+        mock_enrich.assert_called_once_with("text")
+        assert result["ecosystem"] == "Hackage"
+
+    def test_cabal_alias_routes_to_enrich_hackage(self):
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_hackage",
+            return_value={"ecosystem": "Hackage", "package_name": "aeson"},
+        ) as mock_enrich:
+            _enrich_package("aeson", "cabal")
+        mock_enrich.assert_called_once_with("aeson")
+
+
+# ===========================================================================
+# get_dependency_blast_radius — Hackage end-to-end
+# ===========================================================================
+
+
+class TestGetDependencyBlastRadiusHackage:
+    def test_hackage_package_spec_direct(self):
+        hackage_stats = {
+            "ecosystem": "Hackage",
+            "package_name": "cryptonite",
+            "latest_version": "0.30",
+            "total_versions": 31,
+            "dependent_packages_count": 286,
+            "description": "Cryptography Primitives sink",
+            "category": "Cryptography",
+            "home_page": "https://github.com/haskell-crypto/cryptonite",
+            "hackage_page": "https://hackage.haskell.org/package/cryptonite",
+            "blast_radius": "MEDIUM",
+        }
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=hackage_stats,
+            ),
+        ):
+            result = get_dependency_blast_radius("hackage:cryptonite@0.30")
+        assert "cryptonite" in result
+        assert "Hackage" in result
+        assert "Cryptography Primitives" in result
+        assert "0.30" in result
+        assert "286" in result
+
+    def test_hackage_output_contains_blast_radius(self):
+        hackage_stats = {
+            "ecosystem": "Hackage",
+            "package_name": "text",
+            "latest_version": "2.1",
+            "total_versions": 50,
+            "dependent_packages_count": 8000,
+            "blast_radius": "HIGH",
+        }
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=hackage_stats,
+        ):
+            result = get_dependency_blast_radius("hackage:text")
+        assert "HIGH" in result
+        assert "text" in result
+        assert "8,000" in result
 
 
 # ===========================================================================
