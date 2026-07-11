@@ -18,10 +18,12 @@ from manus_agent.tools.get_dependency_blast_radius import (
     _enrich_npm,
     _enrich_package,
     _enrich_pypi,
+    _enrich_swift,
     _fetch_ghsa_affected,
     _fetch_nvd_affected,
     _fetch_osv_affected,
     _parse_input,
+    _parse_swift_timestamp,
     _summarise_osv_ranges,
     get_dependency_blast_radius,
 )
@@ -933,3 +935,478 @@ class TestCliParser:
         from manus_agent.cli import _SUBCOMMANDS
 
         assert "blast-radius" in _SUBCOMMANDS
+
+
+# ===========================================================================
+# _parse_swift_timestamp
+# ===========================================================================
+
+
+class TestParseSwiftTimestamp:
+    def test_standard_z_suffix(self):
+
+        assert _parse_swift_timestamp("2014-07-31T05:56:19Z") == "2014-07-31"
+
+    def test_no_time_component(self):
+
+        assert _parse_swift_timestamp("2021-01-15") == "2021-01-15"
+
+    def test_with_offset(self):
+
+        assert _parse_swift_timestamp("2023-06-01T12:00:00+05:30") == "2023-06-01"
+
+    def test_empty_string(self):
+
+        assert _parse_swift_timestamp("") == ""
+
+    def test_year_month_day_preserved(self):
+
+        assert _parse_swift_timestamp("2019-03-22T18:45:00Z") == "2019-03-22"
+
+
+# ===========================================================================
+# _enrich_swift — unit tests
+# ===========================================================================
+
+_ALAMOFIRE_REPO = {
+    "name": "Alamofire",
+    "description": "Elegant HTTP Networking in Swift",
+    "stargazers_count": 42404,
+    "forks_count": 7665,
+    "created_at": "2014-07-31T05:56:19Z",
+    "html_url": "https://github.com/Alamofire/Alamofire",
+    "language": "Swift",
+}
+
+_ALAMOFIRE_RELEASES = [
+    {"tag_name": "5.10.2", "published_at": "2026-05-05T10:00:00Z"},
+    {"tag_name": "5.10.1", "published_at": "2026-03-01T10:00:00Z"},
+    {"tag_name": "5.0.0", "published_at": "2020-01-01T10:00:00Z"},
+    {"tag_name": "1.0.0", "published_at": "2014-09-16T10:00:00Z"},
+]
+
+
+class TestEnrichSwift:
+    def _make_get(self, repo_data=None, releases_data=None, tags_data=None):
+        """Return a side_effect function that routes mock GET calls."""
+        repo = repo_data if repo_data is not None else _ALAMOFIRE_REPO
+        releases = releases_data if releases_data is not None else _ALAMOFIRE_RELEASES
+        tags = tags_data if tags_data is not None else []
+
+        def _side_effect(url, params=None, headers=None):
+            if "/releases" in url:
+                return releases
+            if "/tags" in url:
+                return tags
+            # Repo metadata call
+            return repo
+
+        return _side_effect
+
+    def test_returns_dict_with_ecosystem(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["ecosystem"] == "SwiftURL"
+        assert result["package_name"] == "Alamofire/Alamofire"
+
+    def test_github_stars_extracted(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["github_stars"] == 42404
+
+    def test_weekly_downloads_proxy_stars_times_100(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["weekly_downloads"] == 42404 * 100
+
+    def test_forks_extracted(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["forks"] == 7665
+
+    def test_description_extracted(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["description"] == "Elegant HTTP Networking in Swift"
+
+    def test_language_extracted(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["language"] == "Swift"
+
+    def test_github_page_extracted(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["github_page"] == "https://github.com/Alamofire/Alamofire"
+
+    def test_latest_version_from_releases(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["latest_version"] == "5.10.2"
+
+    def test_total_versions_from_releases(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["total_versions"] == 4
+
+    def test_first_release_date_oldest_release(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert result["first_release_date"] == "2014-09-16"
+
+    def test_age_years_positive(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        # Package was created in 2014 — should be 10+ years
+        assert result.get("age_years", 0) >= 10.0
+
+    def test_internal_repo_created_at_not_in_result(self):
+        """_repo_created_at should be popped before returning."""
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(),
+        ):
+            result = _enrich_swift("Alamofire/Alamofire")
+        assert "_repo_created_at" not in result
+
+    def test_fallback_to_tags_when_no_releases(self):
+
+        tags = [{"name": "2.0.0"}, {"name": "1.5.0"}, {"name": "1.0.0"}]
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(releases_data=[], tags_data=tags),
+        ):
+            result = _enrich_swift("owner/pkg")
+        assert result["total_versions"] == 3
+        assert result["latest_version"] == "2.0.0"
+
+    def test_graceful_degradation_on_repo_fetch_failure(self):
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=Exception("connection refused"),
+        ):
+            result = _enrich_swift("owner/pkg")
+        # Should return minimal dict without raising
+        assert result["ecosystem"] == "SwiftURL"
+        assert "github_stars" not in result
+
+    def test_graceful_degradation_on_releases_fetch_failure(self):
+
+        call_count = {"n": 0}
+
+        def _side_effect(url, params=None, headers=None):
+            call_count["n"] += 1
+            if "/releases" in url or "/tags" in url:
+                raise Exception("timeout")
+            return _ALAMOFIRE_REPO
+
+        with patch("manus_agent.tools.get_dependency_blast_radius._get", side_effect=_side_effect):
+            result = _enrich_swift("Alamofire/Alamofire")
+        # stars and description should still be populated
+        assert result["github_stars"] == 42404
+        # No crash; version fields missing is acceptable
+        assert result["ecosystem"] == "SwiftURL"
+
+    def test_zero_stars_gives_zero_weekly_downloads(self):
+
+        repo = {**_ALAMOFIRE_REPO, "stargazers_count": 0}
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(repo_data=repo),
+        ):
+            result = _enrich_swift("owner/new-pkg")
+        assert result["weekly_downloads"] == 0
+
+    def test_none_description_does_not_crash(self):
+
+        repo = {**_ALAMOFIRE_REPO, "description": None}
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(repo_data=repo),
+        ):
+            result = _enrich_swift("owner/pkg")
+        assert result["description"] == ""
+
+    def test_description_truncated_to_120_chars(self):
+
+        long_desc = "x" * 200
+        repo = {**_ALAMOFIRE_REPO, "description": long_desc}
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(repo_data=repo),
+        ):
+            result = _enrich_swift("owner/pkg")
+        assert len(result["description"]) <= 120
+
+    def test_multiline_description_newlines_stripped(self):
+
+        repo = {**_ALAMOFIRE_REPO, "description": "First line\nSecond line"}
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._get",
+            side_effect=self._make_get(repo_data=repo),
+        ):
+            result = _enrich_swift("owner/pkg")
+        assert "\n" not in result["description"]
+
+
+# ===========================================================================
+# _enrich_package — dispatch to _enrich_swift
+# ===========================================================================
+
+
+class TestEnrichPackageSwiftDispatch:
+    def _patched_enrich_swift(self):
+        """Return a mock _enrich_swift that records its call args."""
+        calls = []
+
+        def _mock(name):
+            calls.append(name)
+            return {"ecosystem": "SwiftURL", "package_name": name, "github_stars": 500, "weekly_downloads": 50000}
+
+        return _mock, calls
+
+    def test_swift_ecosystem_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            result = _enrich_package("Alamofire/Alamofire", "swift")
+        assert calls == ["Alamofire/Alamofire"]
+        assert result["ecosystem"] == "SwiftURL"
+
+    def test_swifturl_ecosystem_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("owner/repo", "SwiftURL")
+        assert calls == ["owner/repo"]
+
+    def test_ios_alias_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("owner/repo", "ios")
+        assert calls == ["owner/repo"]
+
+    def test_macos_alias_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("owner/repo", "macos")
+        assert calls == ["owner/repo"]
+
+    def test_spm_alias_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("owner/repo", "spm")
+        assert calls == ["owner/repo"]
+
+    def test_swiftpackage_alias_dispatches(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("owner/repo", "swiftpackage")
+        assert calls == ["owner/repo"]
+
+    def test_unknown_ecosystem_not_swift(self):
+        from manus_agent.tools.get_dependency_blast_radius import _enrich_package
+
+        mock_fn, calls = self._patched_enrich_swift()
+        with patch("manus_agent.tools.get_dependency_blast_radius._enrich_swift", mock_fn):
+            _enrich_package("requests", "PyPI")
+        assert calls == []
+
+
+# ===========================================================================
+# get_dependency_blast_radius — Swift integration (end-to-end with mocks)
+# ===========================================================================
+
+
+class TestGetDependencyBlastRadiusSwift:
+    _SWIFT_STATS = {
+        "ecosystem": "SwiftURL",
+        "package_name": "Alamofire/Alamofire",
+        "github_stars": 42404,
+        "forks": 7665,
+        "weekly_downloads": 42404 * 100,
+        "latest_version": "5.10.2",
+        "total_versions": 87,
+        "first_release_date": "2014-09-16",
+        "age_years": 11.8,
+        "description": "Elegant HTTP Networking in Swift",
+        "language": "Swift",
+        "github_page": "https://github.com/Alamofire/Alamofire",
+    }
+
+    def test_direct_swift_package_query(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with (
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=self._SWIFT_STATS,
+            ),
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "Alamofire" in result
+
+    def test_output_contains_github_stars(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "42,404" in result or "42404" in result
+
+    def test_output_contains_latest_version(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "5.10.2" in result
+
+    def test_output_contains_first_released(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "2014-09-16" in result
+
+    def test_output_contains_description(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "Elegant HTTP" in result
+
+    def test_output_contains_github_page(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "github.com/Alamofire" in result
+
+    def test_blast_radius_high_for_alamofire(self):
+        """42 k stars × 100 = 4.24M weekly_downloads → HIGH blast radius."""
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "HIGH" in result or "CRITICAL" in result
+
+    def test_cve_swift_package_in_osv_output(self):
+        """CVE query returning a SwiftURL package should enrich it properly."""
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        osv_pkgs = [
+            {
+                "name": "Alamofire/Alamofire",
+                "ecosystem": "SwiftURL",
+                "version_range": "<5.10.0",
+                "source": "osv",
+            }
+        ]
+        with (
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_nvd_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._fetch_osv_affected",
+                return_value=osv_pkgs,
+            ),
+            patch("manus_agent.tools.get_dependency_blast_radius._fetch_ghsa_affected", return_value=[]),
+            patch(
+                "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+                return_value=self._SWIFT_STATS,
+            ),
+        ):
+            result = get_dependency_blast_radius("CVE-2025-99999")
+        assert "Alamofire" in result
+
+    def test_ecosystem_label_swift_in_output(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=self._SWIFT_STATS,
+        ):
+            result = get_dependency_blast_radius("swift:Alamofire/Alamofire")
+        assert "Swift" in result
+
+    def test_low_stars_gives_low_blast_radius(self):
+        from manus_agent.tools.get_dependency_blast_radius import get_dependency_blast_radius
+
+        low_stats = {**self._SWIFT_STATS, "github_stars": 10, "weekly_downloads": 1000}
+        with patch(
+            "manus_agent.tools.get_dependency_blast_radius._enrich_package",
+            return_value=low_stats,
+        ):
+            result = get_dependency_blast_radius("swift:owner/tiny-pkg")
+        assert "LOW" in result

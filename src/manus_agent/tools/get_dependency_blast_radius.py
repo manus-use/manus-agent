@@ -8,12 +8,13 @@ on the affected package, and how widely it is downloaded.
 Data sources (all free, no API key required):
   1. NVD CVE 2.0 API  — maps CVE → affected packages + version ranges
   2. OSV.dev API       — cross-ecosystem vulnerability data (PyPI, npm, Maven,
-                         Go, RubyGems, crates.io, …)
+                         Go, RubyGems, crates.io, SwiftURL, …)
   3. GitHub Advisory DB — GHSA packages + ecosystems
   4. npm registry API  — dependents count + weekly download stats (npm only)
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. GitHub REST API   — repo metadata + release history (Swift packages only)
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +52,9 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_GITHUB_REPO_URL = "https://api.github.com/repos/{}"
+_GITHUB_RELEASES_URL = "https://api.github.com/repos/{}/releases"
+_GITHUB_TAGS_URL = "https://api.github.com/repos/{}/tags"
 
 _TIMEOUT = 20
 
@@ -66,6 +70,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "SwiftURL": "Swift Package Index (Swift/Apple)",
 }
 
 
@@ -373,6 +378,115 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _parse_swift_timestamp(ts: str) -> str:
+    """Normalise a GitHub ISO-8601 timestamp to ``YYYY-MM-DD``.
+
+    GitHub returns timestamps as ``2014-07-31T05:56:19Z``.
+    """
+    if not ts:
+        return ""
+    # Strip trailing Z or +HH:MM offset before slicing
+    ts = ts.rstrip("Z")
+    if "+" in ts:
+        ts = ts.split("+")[0]
+    return ts[:10]  # YYYY-MM-DD
+
+
+def _enrich_swift(name: str) -> dict[str, Any]:
+    """Fetch Swift package metadata from the GitHub API.
+
+    *name* must be an ``owner/repo`` slug (e.g. ``Alamofire/Alamofire``).
+    Swift packages are always hosted on GitHub (or another VCS), and their
+    identity in the OSV ``SwiftURL`` ecosystem is ``github.com/{owner}/{repo}``.
+
+    Metrics returned:
+      - ``github_stars``        — repository star count (main engagement proxy)
+      - ``forks``               — fork count
+      - ``latest_version``      — latest release tag (or latest tag if no releases)
+      - ``total_versions``      — total published release/tag count
+      - ``first_release_date``  — date of the oldest release/tag (ISO YYYY-MM-DD)
+      - ``age_years``           — approximate package age
+      - ``description``         — repo description (120-char truncated)
+      - ``language``            — primary language reported by GitHub
+      - ``github_page``         — HTML URL
+
+    ``weekly_downloads`` is set to ``github_stars * 100`` so that
+    :func:`_blast_score` produces meaningful CRITICAL/HIGH/MEDIUM/LOW labels
+    without requiring a download-stats API.  This proxy is conservative:
+    a package with 40 k stars is depended upon by vastly more than 4 M
+    weekly users, but the scaling keeps the label roughly calibrated with
+    the other ecosystems.
+    """
+    result: dict[str, Any] = {"ecosystem": "SwiftURL", "package_name": name}
+
+    # ---------- Step 1: repository metadata ----------
+    try:
+        repo_data = _get(_GITHUB_REPO_URL.format(name))
+        result["github_stars"] = repo_data.get("stargazers_count", 0)
+        result["forks"] = repo_data.get("forks_count", 0)
+        result["language"] = repo_data.get("language") or ""
+        raw_desc = repo_data.get("description") or ""
+        result["description"] = raw_desc.replace("\n", " ")[:120]
+        result["github_page"] = repo_data.get("html_url", "")
+        created_at = repo_data.get("created_at", "")
+        # Use repo creation as a conservative lower bound for age
+        result["_repo_created_at"] = _parse_swift_timestamp(created_at)
+    except Exception as exc:
+        logger.debug("Swift GitHub repo fetch failed for %s: %s", name, exc)
+        return result
+
+    # Blast-score proxy: stars × 100 → weekly_downloads equivalent
+    stars = result.get("github_stars", 0) or 0
+    result["weekly_downloads"] = stars * 100
+
+    # ---------- Step 2: release history ----------
+    try:
+        releases = _get(_GITHUB_RELEASES_URL.format(name), params={"per_page": 100})
+        if isinstance(releases, list) and releases:
+            result["total_versions"] = len(releases)
+            # GitHub returns newest-first
+            result["latest_version"] = releases[0].get("tag_name", "")
+            oldest_ts = ""
+            for rel in reversed(releases):
+                ts = rel.get("published_at", "")
+                if ts:
+                    oldest_ts = ts
+                    break
+            if oldest_ts:
+                result["first_release_date"] = _parse_swift_timestamp(oldest_ts)
+    except Exception as exc:
+        logger.debug("Swift releases fetch failed for %s: %s", name, exc)
+
+    # ---------- Step 3: tag fallback (no formal releases) ----------
+    if "total_versions" not in result:
+        try:
+            tags = _get(_GITHUB_TAGS_URL.format(name), params={"per_page": 100})
+            if isinstance(tags, list) and tags:
+                result["total_versions"] = len(tags)
+                result["latest_version"] = tags[0].get("name", "")
+        except Exception as exc:
+            logger.debug("Swift tags fetch failed for %s: %s", name, exc)
+
+    # ---------- Step 4: age_years from first_release_date or repo creation ----------
+    base_date = result.get("first_release_date") or result.get("_repo_created_at", "")
+    if base_date:
+        try:
+            import datetime  # noqa: PLC0415
+
+            year = int(base_date[:4])
+            month = int(base_date[5:7])
+            day = int(base_date[8:10])
+            origin = datetime.date(year, month, day)
+            today = datetime.date.today()
+            result["age_years"] = round((today - origin).days / 365.25, 1)
+        except Exception:
+            pass
+
+    # Remove internal key
+    result.pop("_repo_created_at", None)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +496,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("swift", "swifturl", "swiftpackage", "ios", "macos", "spm"):
+        return _enrich_swift(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -434,6 +550,12 @@ def get_dependency_blast_radius(  # noqa: C901
        - **PyPI**: package metadata + download stats (when pypistats is available)
        - **Maven**: artifact metadata from Maven Central
     3. Computes a qualitative blast-radius label: CRITICAL / HIGH / MEDIUM / LOW.
+
+    Supported ecosystems and their enrichment data sources:
+      - **npm**:      dependent package count + weekly/monthly download stats
+      - **PyPI**:     package metadata + download stats (when pypistats is available)
+      - **Maven**:    artifact metadata from Maven Central
+      - **Swift**:    GitHub repo stars, release history, age (via GitHub REST API)
 
     Use after ``get_nvd_data`` to understand *how many projects are exposed*
     to a vulnerability — the answer is often orders of magnitude larger than
@@ -558,6 +680,27 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Swift-specific stats
+        if eco.lower() in ("swifturl", "swift", "swiftpackage", "ios", "macos", "spm"):
+            if r.get("github_stars") is not None:
+                lines.append(f"    GitHub stars:     {r['github_stars']:,}")
+            if r.get("forks") is not None:
+                lines.append(f"    Forks:            {r['forks']:,}")
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("total_versions"):
+                lines.append(f"    Total versions:   {r['total_versions']}")
+            if r.get("first_release_date"):
+                age = r.get("age_years", "")
+                age_str = f" ({age} yrs)" if age else ""
+                lines.append(f"    First released:   {r['first_release_date']}{age_str}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("language"):
+                lines.append(f"    Language:         {r['language']}")
+            if r.get("github_page"):
+                lines.append(f"    GitHub page:      {r['github_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
