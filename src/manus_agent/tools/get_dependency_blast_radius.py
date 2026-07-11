@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. Bioconductor      — R/Bioconductor package metadata; dependsOnMe +
+                         importsMe counts for blast-radius estimation
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -51,6 +53,7 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_BIOC_PACKAGES_URL = "https://bioconductor.org/packages/json/3.19/bioc/packages.json"
 
 _TIMEOUT = 20
 
@@ -66,6 +69,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "Bioconductor": "Bioconductor (R/Bioinformatics)",
 }
 
 
@@ -373,6 +377,59 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _enrich_bioconductor(name: str) -> dict[str, Any]:
+    """
+    Fetch Bioconductor package metadata from the release JSON manifest.
+
+    Uses ``https://bioconductor.org/packages/json/3.19/bioc/packages.json``
+    which is a single-call, unauthenticated endpoint that returns all ~2300
+    packages with version, reverse-dependency lists, download rank, and
+    biocViews category tags.
+
+    Blast-radius signal: ``dependent_packages_count`` = len(dependsOnMe) +
+    len(importsMe) — i.e., the packages that would *break* if this one changed.
+    ``suggestsMe`` is deliberately excluded: soft suggestions rarely cause
+    build failures and would inflate the score.
+    """
+    result: dict[str, Any] = {"ecosystem": "Bioconductor", "package_name": name}
+    try:
+        data = _get(_BIOC_PACKAGES_URL)
+    except Exception as exc:
+        logger.debug("Bioconductor manifest fetch failed: %s", exc)
+        return result
+
+    pkg = data.get(name) or data.get(name.lower())
+    if pkg is None:
+        # Case-insensitive fallback
+        name_lower = name.lower()
+        for k, v in data.items():
+            if k.lower() == name_lower:
+                pkg = v
+                break
+    if pkg is None:
+        logger.debug("Package %r not found in Bioconductor manifest", name)
+        return result
+
+    depends_on_me: list[str] = pkg.get("dependsOnMe") or []
+    imports_me: list[str] = pkg.get("importsMe") or []
+    # Hard reverse-dep count (Depends + Imports); excludes soft Suggests
+    hard_rev_deps = len(depends_on_me) + len(imports_me)
+
+    result["latest_version"] = pkg.get("Version", "")
+    result["title"] = pkg.get("Title", "")
+    result["description"] = (pkg.get("Description") or "")[:120]
+    result["bioc_views"] = ", ".join((pkg.get("biocViews") or [])[:5])
+    result["download_rank"] = pkg.get("Rank")  # lower = more popular
+    result["dependency_count"] = pkg.get("dependencyCount")  # how many deps it has
+    result["dependent_packages_count"] = hard_rev_deps  # drives _blast_score
+    result["depends_on_me"] = len(depends_on_me)
+    result["imports_me"] = len(imports_me)
+    result["suggests_me"] = len(pkg.get("suggestsMe") or [])
+    result["git_url"] = pkg.get("git_url", "")
+    result["bioc_page"] = f"https://bioconductor.org/packages/release/bioc/html/{name}.html"
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +439,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("bioconductor", "bioc", "r-bioc", "rbioconductor"):
+        return _enrich_bioconductor(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -558,6 +617,31 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # Bioconductor-specific stats
+        if eco.lower() in ("bioconductor", "bioc"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("title"):
+                lines.append(f"    Title:            {r['title'][:80]}")
+            if r.get("dependent_packages_count") is not None:
+                lines.append(
+                    f"    Hard rev-deps:    {r['dependent_packages_count']:,}"
+                    f"  (dependsOnMe={r.get('depends_on_me', 0)},"
+                    f" importsMe={r.get('imports_me', 0)})"
+                )
+            if r.get("suggests_me"):
+                lines.append(f"    Soft rev-deps:    {r['suggests_me']:,}  (suggestsMe, not scored)")
+            if r.get("download_rank"):
+                lines.append(f"    Bioc DL rank:     #{r['download_rank']}  (lower → more downloaded)")
+            if r.get("bioc_views"):
+                lines.append(f"    biocViews:        {r['bioc_views']}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("git_url"):
+                lines.append(f"    Git source:       {r['git_url']}")
+            if r.get("bioc_page"):
+                lines.append(f"    Bioconductor:     {r['bioc_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
