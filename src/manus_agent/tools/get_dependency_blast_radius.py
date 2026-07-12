@@ -51,6 +51,7 @@ _NPM_DOWNLOADS_URL = "https://api.npmjs.org/downloads/point/last-week/{}"
 _PYPI_JSON_URL = "https://pypi.org/pypi/{}/json"
 _PYPISTATS_URL = "https://pypistats.org/api/packages/{}/recent"
 _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
+_VCPKG_OUTPUT_URL = "https://vcpkg.io/output.json"
 
 _TIMEOUT = 20
 
@@ -66,7 +67,11 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "vcpkg": "vcpkg (C/C++)",
 }
+
+# Cache for vcpkg manifest (fetched once per process invocation)
+_VCPKG_MANIFEST_CACHE: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +378,111 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+def _enrich_vcpkg(name: str) -> dict[str, Any]:
+    """Fetch vcpkg package metadata and reverse-dependency count.
+
+    Uses the ``https://vcpkg.io/output.json`` manifest — a single unauthenticated
+    JSON endpoint (~2800 C/C++ packages) that contains full port metadata including
+    version, description, homepage, license, dependency list, and last-modified date.
+
+    Reverse-dependency count is computed locally by counting how many other ports
+    list this package in their ``Dependencies`` field.  Infrastructure meta-ports
+    (``vcpkg-cmake``, ``vcpkg-cmake-config``, ``vcpkg-make``, ``vcpkg-msbuild``,
+    ``vcpkg-pkgconfig-get-modules``) are excluded from the blast-radius signal
+    because they are build-system helpers, not library dependencies.
+    """
+    global _VCPKG_MANIFEST_CACHE  # noqa: PLW0603
+
+    result: dict[str, Any] = {"ecosystem": "vcpkg", "package_name": name}
+
+    # Meta-ports that every package depends on — excluded from blast signal
+    _VCPKG_META_PORTS = frozenset(
+        {
+            "vcpkg-cmake",
+            "vcpkg-cmake-config",
+            "vcpkg-make",
+            "vcpkg-msbuild",
+            "vcpkg-pkgconfig-get-modules",
+            "vcpkg-tool-meson",
+        }
+    )
+
+    try:
+        if _VCPKG_MANIFEST_CACHE is None:
+            manifest = _get(_VCPKG_OUTPUT_URL)
+            _VCPKG_MANIFEST_CACHE = manifest
+        else:
+            manifest = _VCPKG_MANIFEST_CACHE
+
+        source_pkgs: list[dict[str, Any]] = manifest.get("Source", [])
+        total_packages = manifest.get("Size", len(source_pkgs))
+
+        # Case-insensitive lookup
+        name_lower = name.lower()
+        pkg: dict[str, Any] | None = None
+        for p in source_pkgs:
+            if p.get("Name", "").lower() == name_lower:
+                pkg = p
+                break
+
+        if pkg is None:
+            result["error"] = f"Package {name!r} not found in vcpkg registry ({total_packages} packages indexed)"
+            return result
+
+        # Basic metadata
+        result["latest_version"] = pkg.get("Version", "")
+        port_version = pkg.get("Port-Version", 0)
+        if port_version:
+            result["port_version"] = port_version
+        result["description"] = (pkg.get("Description") or "")[:120]
+        result["homepage"] = pkg.get("homepage", "")
+        result["license"] = pkg.get("License", "")
+        result["last_modified"] = pkg.get("LastModified", "")
+        result["vcpkg_page"] = f"https://vcpkg.io/en/package/{pkg['Name']}"
+
+        # Direct dependency count (excluding meta-ports)
+        raw_deps: list[str | dict[str, Any]] = pkg.get("Dependencies", [])
+        lib_deps = [
+            (d if isinstance(d, str) else d.get("name", ""))
+            for d in raw_deps
+            if (d if isinstance(d, str) else d.get("name", "")) not in _VCPKG_META_PORTS
+        ]
+        result["direct_dep_count"] = len(lib_deps)
+        if lib_deps:
+            result["direct_deps_sample"] = lib_deps[:8]
+
+        # Reverse-dependency count: count how many *other* ports list this package
+        # in their Dependencies, excluding meta-ports from the count too.
+        canonical_name = pkg["Name"]
+        rev_dep_count = 0
+        for other in source_pkgs:
+            if other.get("Name") == canonical_name:
+                continue
+            if canonical_name in _VCPKG_META_PORTS:
+                continue
+            for dep in other.get("Dependencies", []):
+                dep_name = dep if isinstance(dep, str) else dep.get("name", "")
+                if dep_name.lower() == canonical_name.lower():
+                    rev_dep_count += 1
+                    break
+
+        result["dependent_packages_count"] = rev_dep_count
+        result["total_vcpkg_packages"] = total_packages
+
+        # Feature count (optional capabilities exposed as installable features)
+        features = pkg.get("Features", {})
+        if isinstance(features, dict):
+            result["feature_count"] = len(features)
+        elif isinstance(features, list):
+            result["feature_count"] = len(features)
+
+    except Exception as exc:
+        logger.debug("vcpkg enrich failed for %s: %s", name, exc)
+        result["error"] = str(exc)
+
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +492,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("vcpkg", "c++", "cpp", "conan"):
+        return _enrich_vcpkg(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -534,12 +646,13 @@ def get_dependency_blast_radius(  # noqa: C901
             lines.append(f"    Vulnerable range: {ver_range}")
 
         # npm-specific stats
-        if "dependent_packages_count" in r:
-            lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
-        if r.get("weekly_downloads") is not None:
-            lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
-        if r.get("monthly_downloads") is not None:
-            lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
+        if eco.lower() in ("npm", "javascript", "node"):
+            if "dependent_packages_count" in r:
+                lines.append(f"    npm dependents:   {r['dependent_packages_count']:,}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
 
         # PyPI-specific stats
         if eco.lower() in ("pypi", "python"):
@@ -549,6 +662,10 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Total releases:   {r['release_count']}")
             if r.get("description"):
                 lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("weekly_downloads") is not None:
+                lines.append(f"    Weekly downloads: {r['weekly_downloads']:,}")
+            if r.get("monthly_downloads") is not None:
+                lines.append(f"    Monthly downloads:{r['monthly_downloads']:,}")
 
         # Maven-specific stats
         if eco.lower() in ("maven", "java"):
@@ -558,6 +675,31 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # vcpkg-specific stats
+        if eco.lower() in ("vcpkg", "c++", "cpp"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("port_version"):
+                lines.append(f"    Port version:     {r['port_version']}")
+            if "dependent_packages_count" in r:
+                lines.append(f"    vcpkg rev-deps:   {r['dependent_packages_count']:,}")
+            if r.get("direct_dep_count") is not None:
+                lines.append(f"    Direct deps:      {r['direct_dep_count']}")
+            if r.get("direct_deps_sample"):
+                lines.append(f"    Deps sample:      {', '.join(r['direct_deps_sample'][:5])}")
+            if r.get("feature_count"):
+                lines.append(f"    Features:         {r['feature_count']} optional feature(s)")
+            if r.get("license"):
+                lines.append(f"    License:          {r['license']}")
+            if r.get("description"):
+                lines.append(f"    Description:      {r['description'][:80]}")
+            if r.get("last_modified"):
+                lines.append(f"    Last modified:    {r['last_modified']}")
+            if r.get("homepage"):
+                lines.append(f"    Homepage:         {r['homepage']}")
+            if r.get("vcpkg_page"):
+                lines.append(f"    vcpkg page:       {r['vcpkg_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
@@ -577,6 +719,6 @@ def get_dependency_blast_radius(  # noqa: C901
         if total_weekly:
             sections.append(f"         Total weekly downloads across all packages: {total_weekly:,}")
         if total_dependents:
-            sections.append(f"         Total npm dependent packages: {total_dependents:,}")
+            sections.append(f"         Total dependent packages (across all ecosystems): {total_dependents:,}")
 
     return "\n".join(sections)
