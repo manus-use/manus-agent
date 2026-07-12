@@ -25,6 +25,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [compare](#manus-agent-compare-cve-a-cve-b--side-by-side-comparison)
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
+  - [osv](#manus-agent-osv-cve-id--osvdev-package-level-version-ranges)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
@@ -304,6 +305,33 @@ Queries five PoC sources **in parallel**, deduplicates results, and sorts by exp
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sources LIST` | all | Comma-separated subset: `trickest,vulncheck_kev,exploitdb,github,nvd` |
+| `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent osv <CVE-ID>` — OSV.dev package-level version ranges
+
+```bash
+manus-agent osv CVE-2021-44228
+manus-agent osv CVE-2024-3094 --output json
+manus-agent osv CVE-2024-3094 --output json | jq '.records[].affected_packages'
+```
+
+Resolves a CVE to its [OSV.dev](https://osv.dev) affected packages and exact version ranges. OSV normalises ecosystem advisories (GHSA, PyPA, npm, Go, RustSec, Maven and others) into concrete `package + version-range` tuples, giving the first-fixed version per package — more actionable than NVD's CPE model.
+
+When the CVE's own OSV record carries no package-level data, the tool automatically follows its GHSA aliases to recover per-package ranges.
+
+| Output field | Description |
+|---|---|
+| `affected_packages[].ecosystem` | Ecosystem name (e.g. `Maven`, `PyPI`, `npm`, `Go`) |
+| `affected_packages[].package` | Package name as used in the ecosystem |
+| `affected_packages[].introduced` | Version where the vulnerability was introduced |
+| `affected_packages[].fixed` | First version that contains a fix |
+| `affected_packages[].last_affected` | Last vulnerable version (if distinct from fixed−1) |
+| `aliases` | All CVE / GHSA IDs that refer to the same flaw |
+
+| Flag | Default | Description |
+|------|---------|-------------|
 | `--output {text,json}` | `text` | Output format |
 
 ---
