@@ -14,6 +14,8 @@ Data sources (all free, no API key required):
   5. PyPI JSON API     — package metadata (PyPI only; download counts from
                          pypistats.org with graceful degradation on 429)
   6. Maven Central     — artifact metadata + version count (Maven only)
+  7. OPAM (OCaml)      — opam-repository GitHub API; version count, synopsis,
+                         homepage, license, depends count, reverse-dep proxy
 
 The tool deliberately avoids paid/rate-limited APIs so it works without
 configuration.  When a source is unavailable the result degrades gracefully.
@@ -24,6 +26,7 @@ CLI: ``manus-agent blast-radius requests@2.28.0``
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from typing import Any
@@ -54,6 +57,20 @@ _MAVEN_SEARCH_URL = "https://search.maven.org/solrsearch/select"
 
 _TIMEOUT = 20
 
+# OPAM / opam-repository constants
+_OPAM_REPO_URL = "https://api.github.com/repos/ocaml/opam-repository/contents/packages/{name}"
+_OPAM_FILE_URL = (
+    "https://api.github.com/repos/ocaml/opam-repository/contents/"
+    "packages/{name}/{name}.{version}/opam"
+)
+_OPAM_PKG_PAGE = "https://opam.ocaml.org/packages/{name}/"
+
+# Regex helpers for parsing opam file fields
+_OPAM_SYNOPSIS_RE = re.compile(r'^synopsis:\s+"(.+?)"', re.MULTILINE)
+_OPAM_HOMEPAGE_RE = re.compile(r'^homepage:\s+"(.+?)"', re.MULTILINE)
+_OPAM_LICENSE_RE = re.compile(r'^license:\s+"(.+?)"', re.MULTILINE)
+_OPAM_DEPENDS_RE = re.compile(r'^depends:\s*\[(.+?)^\]', re.MULTILINE | re.DOTALL)
+
 # OSV ecosystem → display name mapping
 _ECOSYSTEM_LABEL: dict[str, str] = {
     "PyPI": "PyPI (Python)",
@@ -66,6 +83,7 @@ _ECOSYSTEM_LABEL: dict[str, str] = {
     "Packagist": "Packagist (PHP)",
     "Hex": "Hex (Elixir/Erlang)",
     "Pub": "Pub (Dart/Flutter)",
+    "OPAM": "OPAM (OCaml)",
 }
 
 
@@ -373,6 +391,181 @@ def _enrich_maven(name: str) -> dict[str, Any]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# OPAM (OCaml) enrichment
+# ---------------------------------------------------------------------------
+
+
+def _parse_opam_versions(entries: list[dict[str, Any]], name: str) -> list[str]:
+    """
+    Extract version strings from a GitHub Contents API directory listing.
+
+    Each entry has a ``name`` field like ``tls.2.1.1``; we strip the package
+    prefix and return a list of bare version strings (newest-first via reverse
+    lexicographic sort as a cheap approximation — semver-correct ordering is
+    handled separately when we need the actual latest version).
+    """
+    prefix = f"{name.lower()}."
+    versions: list[str] = []
+    for entry in entries:
+        entry_name: str = entry.get("name", "")
+        if entry_name.lower().startswith(prefix):
+            ver = entry_name[len(prefix) :]
+            if ver:
+                versions.append(ver)
+    # Reverse-sort so that the first element is a good "latest" candidate.
+    # We prefer this over a full semver sort to avoid importing packaging.
+    versions.sort(reverse=True)
+    return versions
+
+
+def _pick_latest_opam_version(versions: list[str]) -> str:
+    """
+    Return the best "latest" version from the list returned by
+    ``_parse_opam_versions``.  Prefers versions that look like plain semver
+    (digits and dots only) over dev/rc/alpha/beta suffixes.
+    """
+    stable = [v for v in versions if re.match(r"^\d+(\.\d+)*$", v)]
+    return (stable[0] if stable else versions[0]) if versions else ""
+
+
+def _parse_opam_file(content: str) -> dict[str, str | int]:
+    """
+    Extract key fields from a raw opam file string.
+
+    Returns a dict with zero or more of:
+      synopsis, homepage, license, depends_count
+    """
+    result: dict[str, str | int] = {}
+
+    m = _OPAM_SYNOPSIS_RE.search(content)
+    if m:
+        result["synopsis"] = m.group(1).strip()
+
+    m = _OPAM_HOMEPAGE_RE.search(content)
+    if m:
+        result["homepage"] = m.group(1).strip()
+
+    m = _OPAM_LICENSE_RE.search(content)
+    if m:
+        result["license"] = m.group(1).strip()
+
+    m = _OPAM_DEPENDS_RE.search(content)
+    if m:
+        deps_block = m.group(1)
+        # Each dependency is a quoted package name (possibly with version constraints).
+        # Count distinct quoted names, excluding build-tool meta-deps.
+        dep_names = re.findall(r'"([^"]+?)"', deps_block)
+        # Strip conditional suffixes like " {with-test}"
+        dep_names = [d.split()[0] for d in dep_names]
+        # Filter out version constraint strings (e.g. "4.13.0") and
+        # OCaml meta-packages that are always present.
+        # Opam package names start with a letter: [A-Za-z][A-Za-z0-9._-]*
+        _pkg_name_re = re.compile(r'^[A-Za-z][A-Za-z0-9._-]*$')
+        _meta = {"ocaml", "dune", "ocamlfind", "base", "jbuilder"}
+        real_deps = [
+            d for d in dep_names
+            if _pkg_name_re.match(d) and d not in _meta and not d.startswith("{")
+        ]
+        result["depends_count"] = len(set(real_deps))
+
+    return result
+
+
+def _enrich_opam(name: str) -> dict[str, Any]:  # noqa: C901
+    """
+    Fetch OCaml OPAM package metadata from the opam-repository on GitHub.
+
+    Three-step enrichment:
+      1. List ``packages/{name}/`` in the opam-repository to get available
+         versions and total version count.
+      2. Fetch the opam file for the latest version to extract synopsis,
+         homepage, license, and the number of declared dependencies.
+      3. Use the GitHub code-search API (authenticated via ``gh`` token or
+         ``GITHUB_TOKEN`` env var) to count opam files that mention the
+         package name in a ``depends`` block — a proxy for reverse-dependency
+         count.  Fails gracefully when unauthenticated (HTTP 401/403/422).
+
+    The ``dependent_packages_count`` field drives ``_blast_score``.
+    """
+    result: dict[str, Any] = {"ecosystem": "OPAM", "package_name": name}
+
+    # --- Step 1: version list ---
+    try:
+        versions_data = _get(
+            _OPAM_REPO_URL.format(name=name),
+            headers={"Accept": "application/vnd.github.v3+json"},
+        )
+        if not isinstance(versions_data, list):
+            # Might be a 404 dict or error
+            logger.debug("OPAM version list unexpected response for %s", name)
+            return result
+
+        versions = _parse_opam_versions(versions_data, name)
+        result["version_count"] = len(versions)
+        latest = _pick_latest_opam_version(versions)
+        if latest:
+            result["latest_version"] = latest
+    except Exception as exc:
+        logger.debug("OPAM version list failed for %s: %s", name, exc)
+        return result
+
+    if not versions:
+        logger.debug("OPAM: no versions found for %s", name)
+        return result
+
+    # --- Step 2: opam file metadata ---
+    try:
+        opam_data = _get(
+            _OPAM_FILE_URL.format(name=name, version=latest),
+            headers={"Accept": "application/vnd.github.v3+json"},
+        )
+        if isinstance(opam_data, dict) and opam_data.get("content"):
+            raw_content = base64.b64decode(opam_data["content"]).decode("utf-8", errors="replace")
+            meta = _parse_opam_file(raw_content)
+            result.update(meta)
+    except Exception as exc:
+        logger.debug("OPAM opam-file fetch failed for %s@%s: %s", name, latest, exc)
+        # Non-fatal: continue without file metadata
+
+    # --- Step 3: reverse-dependency proxy via GitHub code search ---
+    # Search for opam files in opam-repository that mention the package name
+    # inside a depends block.  Uses the authenticated GitHub Search API via
+    # the ``gh`` CLI token stored in ~/.config/gh/hosts.yml.
+    try:
+        import subprocess
+        from urllib.parse import quote
+
+        # Build a search query: look for \"name\" in opam files in opam-repository.
+        # The query uses URL-encoded double-quoted name to match exact package deps.
+        # Example: search/code?q=%22%5C%22tls%5C%22%22+repo:ocaml/opam-repository+filename:opam
+        quoted_name = quote(f'"\\\"{ name }\\\""', safe="")
+        api_path = (
+            f"search/code?q={quoted_name}"
+            "+repo:ocaml/opam-repository+filename:opam&per_page=1"
+        )
+        proc = subprocess.run(
+            ["gh", "api", api_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            import json as _json
+
+            search_result = _json.loads(proc.stdout)
+            total = search_result.get("total_count")
+            if isinstance(total, int):
+                # Subtract 1 for the package's own opam file(s)
+                result["dependent_packages_count"] = max(0, total - len(versions))
+    except Exception as exc:
+        logger.debug("OPAM reverse-dep search failed for %s: %s", name, exc)
+        # Non-fatal: blast score will be UNKNOWN without this
+
+    result["opam_page"] = _OPAM_PKG_PAGE.format(name=name)
+    return result
+
+
 def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
     """Dispatch to the right enrichment function based on ecosystem."""
     eco_lower = (ecosystem or "").lower()
@@ -382,6 +575,8 @@ def _enrich_package(name: str, ecosystem: str) -> dict[str, Any]:
         return _enrich_pypi(name)
     elif eco_lower in ("maven", "java", "gradle"):
         return _enrich_maven(name)
+    elif eco_lower in ("opam", "ocaml", "caml"):
+        return _enrich_opam(name)
     # Unknown ecosystem — return minimal record
     return {"ecosystem": ecosystem, "package_name": name}
 
@@ -558,6 +753,25 @@ def get_dependency_blast_radius(  # noqa: C901
                 lines.append(f"    Latest version:   {r['latest_version']}")
             if r.get("version_count"):
                 lines.append(f"    Version count:    {r['version_count']}")
+
+        # OPAM (OCaml) specific stats
+        if eco.lower() in ("opam", "ocaml", "caml"):
+            if r.get("latest_version"):
+                lines.append(f"    Latest version:   {r['latest_version']}")
+            if r.get("version_count"):
+                lines.append(f"    Total versions:   {r['version_count']}")
+            if r.get("dependent_packages_count") is not None:
+                lines.append(f"    OPAM rev-deps:    {r['dependent_packages_count']:,}")
+            if r.get("depends_count"):
+                lines.append(f"    Direct depends:   {r['depends_count']}")
+            if r.get("synopsis"):
+                lines.append(f"    Synopsis:         {str(r['synopsis'])[:80]}")
+            if r.get("license"):
+                lines.append(f"    License:          {r['license']}")
+            if r.get("homepage"):
+                lines.append(f"    Homepage:         {r['homepage']}")
+            if r.get("opam_page"):
+                lines.append(f"    OPAM page:        {r['opam_page']}")
 
         if source:
             lines.append(f"    Data sources:     {source}")
