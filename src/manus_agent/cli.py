@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "check-kev",
 }
 
 
@@ -1935,6 +1936,129 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# check-kev subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_check_kev_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent check-kev",
+        description=(
+            "Check whether a CVE is listed in the CISA Known Exploited Vulnerabilities (KEV)\n"
+            "catalog — a definitive signal that a vulnerability is being actively exploited\n"
+            "in the wild by real-world threat actors."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+_CVE_RE = __import__("re").compile(r"^CVE-\d{4}-\d{4,}$", __import__("re").IGNORECASE)
+
+
+def _run_check_kev(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+
+    parser = _build_check_kev_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not _CVE_RE.match(cve_id):
+        print(f"[error] Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_agent.tools.check_cisa_kev import _get_kev_data
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        kev_data = _get_kev_data()
+    except Exception as exc:
+        print(f"[error] CISA KEV API request failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not kev_data or "vulnerabilities" not in kev_data:
+        print("[error] Could not retrieve or parse CISA KEV catalog", file=sys.stderr)
+        return 1
+
+    entry: dict = {}
+    for vuln in kev_data.get("vulnerabilities", []):
+        if vuln.get("cveID", "").upper() == cve_id:
+            entry = vuln
+            break
+
+    in_kev = bool(entry)
+
+    if args.output == "json":
+        payload: dict = {
+            "cve_id": cve_id,
+            "in_kev": in_kev,
+        }
+        if in_kev:
+            payload.update(
+                {
+                    "vendor": entry.get("vendorProject", ""),
+                    "product": entry.get("product", ""),
+                    "vulnerability_name": entry.get("vulnerabilityName", ""),
+                    "date_added": entry.get("dateAdded", ""),
+                    "due_date": entry.get("dueDate", ""),
+                    "required_action": entry.get("requiredAction", ""),
+                    "short_description": entry.get("shortDescription", ""),
+                    "ransomware": entry.get("knownRansomwareCampaignUse", "Unknown"),
+                    "cwes": entry.get("cwes", []),
+                    "notes": entry.get("notes", ""),
+                }
+            )
+        print(_json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    if not in_kev:
+        print(f"{cve_id}  ✅  NOT in CISA KEV catalog")
+        print("  No active exploitation confirmed by CISA.")
+        return 0
+
+    ransomware = entry.get("knownRansomwareCampaignUse", "Unknown")
+    ransomware_flag = "  ⚠️  RANSOMWARE ASSOCIATED" if ransomware == "Known" else ""
+    print(f"{cve_id}  🚨  ACTIVELY EXPLOITED — listed in CISA KEV{ransomware_flag}")
+    print()
+    if entry.get("vulnerabilityName"):
+        print(f"  Name            : {entry['vulnerabilityName']}")
+    if entry.get("vendorProject"):
+        print(f"  Vendor/Project  : {entry['vendorProject']}")
+    if entry.get("product"):
+        print(f"  Product         : {entry['product']}")
+    if entry.get("dateAdded"):
+        print(f"  Date added      : {entry['dateAdded']}")
+    if entry.get("dueDate"):
+        print(f"  FCEB due date   : {entry['dueDate']}")
+    if entry.get("cwes"):
+        print(f"  CWEs            : {', '.join(entry['cwes'])}")
+    if entry.get("shortDescription"):
+        desc = entry["shortDescription"]
+        if len(desc) > 200:
+            desc = desc[:200] + "…"
+        print(f"  Description     : {desc}")
+    if entry.get("requiredAction"):
+        action = entry["requiredAction"]
+        if len(action) > 200:
+            action = action[:200] + "…"
+        print(f"  Required action : {action}")
+    if entry.get("notes"):
+        print(f"  Notes           : {entry['notes']}")
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2392,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "check-kev":
+        idx = argv.index("check-kev")
+        sys.exit(_run_check_kev(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")

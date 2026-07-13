@@ -25,6 +25,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [compare](#manus-agent-compare-cve-a-cve-b--side-by-side-comparison)
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
+  - [check-kev](#manus-agent-check-kev-cve-id--cisa-kev-lookup)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
@@ -304,6 +305,26 @@ Queries five PoC sources **in parallel**, deduplicates results, and sorts by exp
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sources LIST` | all | Comma-separated subset: `trickest,vulncheck_kev,exploitdb,github,nvd` |
+| `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent check-kev <CVE-ID>` — CISA KEV lookup
+
+```bash
+manus-agent check-kev CVE-2021-44228
+manus-agent check-kev CVE-2021-44228 --output json | jq .in_kev
+manus-agent check-kev CVE-2024-3094 --output json | jq .ransomware
+```
+
+Checks whether a CVE is listed in the [CISA Known Exploited Vulnerabilities (KEV)](https://www.cisa.gov/known-exploited-vulnerabilities-catalog) catalog — the most authoritative signal that a vulnerability is actively exploited in the wild by real threat actors.
+
+When a CVE is in the catalog, the output includes the vendor, product, CISA-mandated due date for federal agencies (FCEB), associated CWEs, a description, and the required remediation action. A 🚨 **ACTIVELY EXPLOITED** banner is printed for any KEV hit; an additional ⚠️ **RANSOMWARE ASSOCIATED** warning is shown when CISA has confirmed ransomware campaign use.
+
+The underlying catalog is fetched from `cisa.gov` and cached locally for one hour.
+
+| Flag | Default | Description |
+|------|---------|-------------|
 | `--output {text,json}` | `text` | Output format |
 
 ---
