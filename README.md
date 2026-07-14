@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [cwe](#manus-agent-cwe-cwe-id--cwe-weakness-lookup)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -341,6 +342,26 @@ Blast-radius labels per package:
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent cwe <CWE-ID>` — CWE weakness lookup
+
+```bash
+manus-agent cwe CWE-79
+manus-agent cwe 787
+manus-agent cwe CWE-89 --output json | jq .description
+```
+
+Looks up a Common Weakness Enumeration (CWE) identifier from the MITRE CWE
+database and displays its description and reference URL. Accepts both `CWE-NNN`
+and plain numeric formats.
+
+| Field | Description |
+|-------|-------------|
+| CWE ID | Normalised identifier (e.g. CWE-79) |
+| URL | Direct link to MITRE CWE definition page |
+| Description | Human-readable weakness description from MITRE |
 
 ---
 
