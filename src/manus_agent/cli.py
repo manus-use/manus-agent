@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cwe",
 }
 
 
@@ -1935,6 +1936,93 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cwe subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cwe_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cwe",
+        description=(
+            "Look up a CWE (Common Weakness Enumeration) identifier and display\n"
+            "its description, related weaknesses, and MITRE reference URL.\n"
+            "Useful for understanding the class of vulnerability behind a CVE."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cwe_id",
+        metavar="CWE-ID",
+        help="CWE identifier, e.g. CWE-79 or 79",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cwe(argv: list[str]) -> int:
+    parser = _build_cwe_parser()
+    args = parser.parse_args(argv)
+    raw_id = args.cwe_id.strip()
+
+    # Normalise: accept both "CWE-79" and plain "79"
+    if raw_id.upper().startswith("CWE-"):
+        cwe_id = raw_id.upper()
+    elif raw_id.isdigit():
+        cwe_id = f"CWE-{raw_id}"
+    else:
+        print(f"[error] Invalid CWE ID: {raw_id!r}. Expected CWE-NNN or a number.", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_agent.tools.get_cwe_details import get_cwe_details
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    # Build a synthetic ToolUse payload matching the Strands SDK contract
+    tool_use = {
+        "toolUseId": "cli-cwe-lookup",
+        "input": {"cwe_id": cwe_id},
+    }
+    result = get_cwe_details(tool_use)
+
+    status = result.get("status", "error")
+    content = result.get("content", [])
+
+    if status == "error":
+        error_text = content[0].get("text", "Unknown error") if content else "Unknown error"
+        print(f"[error] {error_text}", file=sys.stderr)
+        return 1
+
+    # Extract payload from the successful result
+    payload = content[0].get("json", {}) if content else {}
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    print(f"\n  CWE ID : {payload.get('cwe_id', cwe_id)}")
+    print(f"  URL    : {payload.get('url', 'N/A')}")
+    print()
+    description = payload.get("description", "No description available.")
+    # Wrap description at ~78 chars for terminal readability
+    import textwrap
+
+    wrapped = textwrap.fill(description, width=78, initial_indent="  ", subsequent_indent="  ")
+    print(wrapped)
+    print()
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2356,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cwe":
+        idx = argv.index("cwe")
+        sys.exit(_run_cwe(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
