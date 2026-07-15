@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "otx",
 }
 
 
@@ -1935,6 +1936,135 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# otx subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_otx_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent otx",
+        description=(
+            "Fetch threat intelligence from AlienVault OTX for a CVE.\n"
+            "Reports associated threat pulses, indicators of compromise (IoCs),\n"
+            "and related threat actors from the Open Threat Exchange."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_otx(argv: list[str]) -> int:
+    parser = _build_otx_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not cve_id.startswith("CVE-"):
+        print("[error] Invalid CVE ID format. Must be like CVE-YYYY-NNNN.", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_agent.tools.get_otx_cve_details import get_otx_cve_details
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    # Build a synthetic ToolUse dict to call the Strands tool
+    tool_use: dict = {
+        "toolUseId": "cli-otx-invocation",
+        "input": {"cve_id": cve_id},
+    }
+    result = get_otx_cve_details(tool_use)
+
+    status = result.get("status", "error")
+    content = result.get("content", [])
+
+    if status == "error":
+        for block in content:
+            if "text" in block:
+                print(f"[error] {block['text']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        import json
+
+        # If the tool returned structured JSON, output it directly
+        for block in content:
+            if "json" in block:
+                print(json.dumps(block["json"], indent=2))
+                return 0
+            if "text" in block:
+                print(json.dumps({"cve_id": cve_id, "message": block["text"]}, indent=2))
+                return 0
+        return 0
+
+    # --- text output ---
+    for block in content:
+        if "text" in block:
+            print(block["text"])
+            return 0
+        if "json" in block:
+            data = block["json"]
+            _print_otx_text(cve_id, data)
+            return 0
+
+    return 0
+
+
+def _print_otx_text(cve_id: str, data: dict) -> None:
+    """Pretty-print OTX pulse data in human-readable text format."""
+    pulse_info = data.get("pulse_info", {})
+    pulses = pulse_info.get("pulses", [])
+    count = pulse_info.get("count", len(pulses))
+
+    print(f"\N{LARGE RED CIRCLE} AlienVault OTX — {cve_id}")
+    print(f"   Threat pulses: {count}")
+    print()
+
+    for i, pulse in enumerate(pulses[:10]):
+        name = pulse.get("name", "Unnamed pulse")
+        author = pulse.get("author", {}).get("username", "unknown")
+        created = pulse.get("created", "")[:10]
+        modified = pulse.get("modified", "")[:10]
+        tags = pulse.get("tags", [])
+        ioc_count = pulse.get("indicator_count", 0)
+        adversary = pulse.get("adversary", "")
+        tlp = pulse.get("TLP", "")
+        targeted_countries = pulse.get("targeted_countries", [])
+        malware_families = pulse.get("malware_families", [])
+        attack_ids = pulse.get("attack_ids", [])
+
+        print(f"  [{i + 1}] {name}")
+        print(f"      Author: {author}  |  Created: {created}  |  Modified: {modified}")
+        if adversary:
+            print(f"      Adversary: {adversary}")
+        if tlp:
+            print(f"      TLP: {tlp}")
+        if ioc_count:
+            print(f"      Indicators: {ioc_count}")
+        if tags:
+            print(f"      Tags: {', '.join(tags[:8])}")
+        if targeted_countries:
+            print(f"      Targeted countries: {', '.join(targeted_countries[:5])}")
+        if malware_families:
+            families = [f.get("display_name", f.get("id", "")) for f in malware_families[:5]]
+            print(f"      Malware families: {', '.join(families)}")
+        if attack_ids:
+            ids = [a.get("display_name", a.get("id", "")) for a in attack_ids[:5]]
+            print(f"      ATT&CK: {', '.join(ids)}")
+        print()
+
+    if count > 10:
+        print(f"  ... and {count - 10} more pulses (use --output json for full data)")
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2398,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "otx":
+        idx = argv.index("otx")
+        sys.exit(_run_otx(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
