@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [otx](#manus-agent-otx-cve-id--alienvault-otx-threat-intelligence)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -340,6 +341,24 @@ Blast-radius labels per package:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
+| `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent otx <CVE-ID>` — AlienVault OTX threat intelligence
+
+```bash
+manus-agent otx CVE-2024-3094
+manus-agent otx CVE-2021-44228 --output json
+manus-agent otx CVE-2023-44487 --output json | jq '.pulse_info.count'
+```
+
+Fetches threat intelligence from AlienVault OTX (Open Threat Exchange) for a CVE. Reports associated threat pulses, indicators of compromise (IoCs), threat actors, malware families, MITRE ATT&CK techniques, and targeted countries.
+
+Requires `OTX_API_KEY` environment variable or `otx.api_key` in `config.toml`.
+
+| Flag | Default | Description |
+|------|---------|-------------|
 | `--output {text,json}` | `text` | Output format |
 
 ---
