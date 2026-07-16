@@ -32,6 +32,71 @@ TOOL_SPEC = {
     },
 }
 
+# Default curated list of public threat intelligence feeds.
+DEFAULT_THREAT_FEEDS: list[dict[str, str]] = [
+    {
+        "name": "CISA Cybersecurity Advisories",
+        "url": "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+        "type": "rss",
+    },
+]
+
+
+def fetch_threat_intelligence(
+    cve_id: str,
+    *,
+    feeds: list[dict[str, str]] | None = None,
+    timeout: int = 10,
+) -> dict[str, Any]:
+    """Query threat intelligence feeds for a CVE.
+
+    Returns a dict with keys:
+      - summary (str): human-readable summary
+      - intelligence (list[dict]): list of feed match dicts
+      - errors (list[dict]): list of feed errors (feed_name, error)
+    """
+    if feeds is None:
+        feeds = DEFAULT_THREAT_FEEDS
+
+    found_intelligence: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for feed in feeds:
+        try:
+            response = requests.get(feed["url"], timeout=timeout)
+            response.raise_for_status()
+            content = response.text
+
+            # Basic search for CVE ID in the content
+            if cve_id.upper() in content.upper():
+                idx = content.upper().find(cve_id.upper())
+                snippet_start = max(0, idx - 50)
+                snippet_end = min(len(content), idx + 100)
+                found_intelligence.append(
+                    {
+                        "feed_name": feed["name"],
+                        "feed_url": feed["url"],
+                        "cve_found": cve_id,
+                        "snippet": content[snippet_start:snippet_end] + "...",
+                    }
+                )
+
+        except requests.exceptions.RequestException as e:
+            errors.append({"feed_name": feed["name"], "error": str(e)})
+        except Exception as e:
+            errors.append({"feed_name": feed["name"], "error": str(e)})
+
+    if not found_intelligence:
+        summary = f"No direct threat intelligence found for {cve_id} in curated feeds."
+    else:
+        summary = f"Found relevant threat intelligence for {cve_id} in {len(found_intelligence)} feed(s)."
+
+    return {
+        "summary": summary,
+        "intelligence": found_intelligence,
+        "errors": errors,
+    }
+
 
 def query_threat_intelligence_feeds(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_use_id = tool["toolUseId"]
@@ -47,56 +112,16 @@ def query_threat_intelligence_feeds(tool: ToolUse, **kwargs: Any) -> ToolResult:
         log_tool_output_size("query_threat_intelligence_feeds", result)
         return result
 
-    # Curated list of public threat intelligence feeds (example URLs)
-    # In a real-world scenario, this list would be more extensive and potentially configurable.
-    # Parsing logic would also need to be more robust for different feed formats (RSS, JSON, HTML).
-    threat_feeds = [
-        {
-            "name": "CISA Cybersecurity Advisories",
-            "url": "https://www.cisa.gov/cybersecurity-advisories/all.xml",  # Updated RSS feed
-            "type": "rss",
-        },
-        # Removed US-CERT Alerts as it was causing 404 errors and may be deprecated.
-    ]
+    payload = fetch_threat_intelligence(cve_id)
 
-    found_intelligence: list[dict[str, Any]] = []
-
-    for feed in threat_feeds:
-        try:
-            response = requests.get(feed["url"], timeout=10)
-            response.raise_for_status()
-            content = response.text
-
-            # Basic search for CVE ID in the content
-            if cve_id.upper() in content.upper():
-                # In a real tool, you'd parse the RSS/JSON/HTML more intelligently
-                # to extract relevant snippets, titles, and links.
-                found_intelligence.append(
-                    {
-                        "feed_name": feed["name"],
-                        "feed_url": feed["url"],
-                        "cve_found": cve_id,
-                        "snippet": content[
-                            content.upper().find(cve_id.upper()) - 50 : content.upper().find(cve_id.upper()) + 100
-                        ]
-                        + "...",  # Basic snippet
-                    }
-                )
-
-        except requests.exceptions.RequestException as e:
-            # Log the error but continue with other feeds
-            print(f"Error fetching {feed['name']} ({feed['url']}): {e}")
-        except Exception as e:
-            print(f"An unexpected error occurred with {feed['name']}: {e}")
-
-    if not found_intelligence:
+    if not payload["intelligence"]:
         result = {
             "toolUseId": tool_use_id,
             "status": "success",
             "content": [
                 {
                     "json": {
-                        "summary": f"No direct threat intelligence found for {cve_id} in curated feeds.",
+                        "summary": payload["summary"],
                         "intelligence": [],
                     }
                 }
@@ -105,11 +130,10 @@ def query_threat_intelligence_feeds(tool: ToolUse, **kwargs: Any) -> ToolResult:
         log_tool_output_size("query_threat_intelligence_feeds", result)
         return result
 
-    summary = f"Found relevant threat intelligence for {cve_id} in {len(found_intelligence)} feeds."
     result = {
         "toolUseId": tool_use_id,
         "status": "success",
-        "content": [{"json": {"summary": summary, "intelligence": found_intelligence}}],
+        "content": [{"json": {"summary": payload["summary"], "intelligence": payload["intelligence"]}}],
     }
     log_tool_output_size("query_threat_intelligence_feeds", result)
     return result

@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [threat-feeds](#manus-agent-threat-feeds-cve-id--threat-intelligence-feeds)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -340,6 +341,21 @@ Blast-radius labels per package:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
+| `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent threat-feeds <CVE-ID>` — Threat intelligence feeds
+
+```bash
+manus-agent threat-feeds CVE-2024-3094
+manus-agent threat-feeds CVE-2024-3094 --output json | jq .intelligence
+```
+
+Queries curated open-source threat intelligence feeds (CISA advisories, etc.) for mentions of a given CVE ID. Returns matching snippets and feed metadata to help identify threat actor activity, campaigns, and broader context of exploitation.
+
+| Flag | Default | Description |
+|------|---------|-------------|
 | `--output {text,json}` | `text` | Output format |
 
 ---

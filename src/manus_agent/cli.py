@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "threat-feeds",
 }
 
 
@@ -1935,6 +1936,86 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# threat-feeds subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_threat_feeds_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent threat-feeds",
+        description=(
+            "Query open-source threat intelligence feeds for a CVE.\n"
+            "Searches curated public feeds (CISA advisories, etc.) for mentions\n"
+            "of the given CVE ID and returns matching snippets and feed metadata."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_threat_feeds(argv: list[str]) -> int:
+    parser = _build_threat_feeds_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+
+    if not re.match(r"CVE-\d{4}-\d+", cve_id, re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.query_threat_intelligence_feeds import (
+            fetch_threat_intelligence,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: failed to import threat intelligence module: {exc}", file=sys.stderr)
+        return 1
+
+    payload = fetch_threat_intelligence(cve_id)
+
+    if args.output == "json":
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    print()
+    print(f"Threat Intelligence Feeds — {cve_id}")
+    print("=" * 60)
+    print(payload["summary"])
+
+    if payload["intelligence"]:
+        print()
+        for i, entry in enumerate(payload["intelligence"], 1):
+            print(f"  [{i}] {entry['feed_name']}")
+            print(f"      URL: {entry['feed_url']}")
+            snippet = entry.get("snippet", "").strip()
+            if snippet:
+                # Truncate long snippets for terminal readability
+                display_snippet = snippet[:200] + "..." if len(snippet) > 200 else snippet
+                print(f"      Snippet: {display_snippet}")
+            print()
+
+    if payload["errors"]:
+        print("Errors encountered:")
+        for err in payload["errors"]:
+            print(f"  ⚠  {err['feed_name']}: {err['error']}")
+        print()
+
+    if not payload["intelligence"]:
+        print()
+        print("No mentions found in the curated threat intelligence feeds.")
+        print("This does not mean the CVE is not being exploited — it may")
+        print("simply not appear in the feeds currently monitored.")
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2349,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "threat-feeds":
+        idx = argv.index("threat-feeds")
+        sys.exit(_run_threat_feeds(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
