@@ -1054,6 +1054,7 @@ _SUBCOMMANDS = {
     "osv",
     "compare",
     "exploit-complexity",
+    "exploit-search",
     "poc-search",
     "changelog",
     "blast-radius",
@@ -1423,6 +1424,135 @@ def _run_exploit_complexity(argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 # poc-search subcommand
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# exploit-search subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_exploit_search_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent exploit-search",
+        description=(
+            "Search public exploit databases (Exploit-DB, Packet Storm Security) for\n"
+            "known exploits matching a CVE ID or keyword. Queries both sources by default\n"
+            "and presents a unified view."
+        ),
+        add_help=True,
+    )
+    p.add_argument("query", metavar="QUERY", help="CVE ID (e.g. CVE-2024-3094) or keyword to search")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    p.add_argument(
+        "--sources",
+        default="",
+        metavar="LIST",
+        help="Comma-separated sources to query (default: all). Valid: exploitdb,packetstorm",
+    )
+    p.add_argument(
+        "--max-results",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Maximum results per source (default: 5, max: 20)",
+    )
+    return p
+
+
+def _run_exploit_search(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_exploit_search_parser()
+    args = parser.parse_args(argv)
+
+    query: str = args.query.strip()
+    if not query:
+        parser.error("Query must not be empty.")
+
+    max_results = min(max(args.max_results, 1), 20)
+
+    # Determine which sources to query
+    valid_sources = {"exploitdb", "packetstorm"}
+    if args.sources:
+        requested = {s.strip().lower() for s in args.sources.split(",") if s.strip()}
+        unknown = requested - valid_sources
+        if unknown:
+            parser.error(f"Unknown source(s): {', '.join(sorted(unknown))}. Valid: exploitdb, packetstorm")
+        sources = requested
+    else:
+        sources = valid_sources
+
+    results: list[dict] = []
+    errors: list[str] = []
+
+    if "exploitdb" in sources:
+        from manus_agent.tools.search_exploit_db import fetch_exploitdb
+
+        data = fetch_exploitdb(query, max_results=max_results)
+        if data.get("error"):
+            errors.append(f"Exploit-DB: {data['error']}")
+        else:
+            results.append(data)
+
+    if "packetstorm" in sources:
+        from manus_agent.tools.search_packetstorm import fetch_packetstorm
+
+        data = fetch_packetstorm(query, max_results=max_results)
+        if data.get("error"):
+            errors.append(f"Packet Storm: {data['error']}")
+        else:
+            results.append(data)
+
+    # JSON output
+    if args.output == "json":
+        output = {
+            "query": query,
+            "sources_queried": sorted(sources),
+            "results": results,
+            "errors": errors,
+        }
+        print(_json.dumps(output, indent=2))
+        return 1 if (not results and errors) else 0
+
+    # Text output
+    total_exploits = sum(len(r["exploits"]) for r in results)
+    print(f"\n{'=' * 60}")
+    print(f"  Exploit Search: {query}")
+    print(f"{'=' * 60}")
+    print(f"  Sources queried: {', '.join(sorted(sources))}")
+    print(f"  Total exploits found: {total_exploits}")
+    if errors:
+        print(f"  Errors: {len(errors)}")
+    print(f"{'=' * 60}\n")
+
+    for source_data in results:
+        source_name = source_data["source"]
+        exploits = source_data["exploits"]
+        header = f"[{source_name.upper()}]"
+        if not exploits:
+            print(f"{header} No exploits found.\n")
+            continue
+
+        print(f"{header} {len(exploits)} exploit(s):\n")
+        for i, exploit in enumerate(exploits, 1):
+            print(f"  {i}. {exploit['title']}")
+            print(f"     Link: {exploit['link']}")
+            if exploit.get("type") and exploit["type"] != "N/A":
+                print(f"     Type: {exploit['type']}")
+            print()
+
+    if errors:
+        print("ERRORS:")
+        for err in errors:
+            print(f"  ! {err}")
+        print()
+
+    return 1 if (not results and errors) else 0
 
 
 def _build_poc_search_parser() -> argparse.ArgumentParser:
@@ -2256,6 +2386,10 @@ def main() -> None:
     if first_positional == "exploit-complexity":
         idx = argv.index("exploit-complexity")
         sys.exit(_run_exploit_complexity(argv[idx + 1 :]))
+
+    if first_positional == "exploit-search":
+        idx = argv.index("exploit-search")
+        sys.exit(_run_exploit_search(argv[idx + 1 :]))
 
     if first_positional == "poc-search":
         idx = argv.index("poc-search")

@@ -24,6 +24,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [variants](#manus-agent-variants-cve-id--variant-analysis)
   - [compare](#manus-agent-compare-cve-a-cve-b--side-by-side-comparison)
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
+  - [exploit-search](#manus-agent-exploit-search-query--unified-exploit-database-search)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
@@ -280,6 +281,25 @@ Outputs a `complexity_score` (1–5), a label (*trivial / low / moderate / high 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent exploit-search <QUERY>` — Unified exploit database search
+
+```bash
+manus-agent exploit-search CVE-2024-3094
+manus-agent exploit-search CVE-2024-3094 --sources exploitdb,packetstorm
+manus-agent exploit-search "apache struts" --max-results 10
+manus-agent exploit-search CVE-2024-3094 --output json | jq '.results[].exploits[]'
+```
+
+Searches both [Exploit-DB](https://www.exploit-db.com) and [Packet Storm Security](https://packetstormsecurity.com) for public exploits matching a CVE ID or keyword. Presents a unified view across both databases in a single command.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output {text,json}` | `text` | Output format |
+| `--sources LIST` | all | Comma-separated subset: `exploitdb,packetstorm` |
+| `--max-results N` | `5` | Maximum results per source (max: 20) |
 
 ---
 
