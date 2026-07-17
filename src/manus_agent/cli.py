@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "advisory",
 }
 
 
@@ -1935,6 +1936,167 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# advisory subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_advisory_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent advisory",
+        description=(
+            "Fetch GitHub Security Advisory (GHSA) details for a CVE.\n"
+            "Queries the public GitHub Advisory Database and displays\n"
+            "severity, affected packages, CVSS score, CWEs, and references."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _print_advisory_text(data: dict) -> None:  # noqa: C901
+    """Pretty-print a GitHub advisory to stdout."""
+    ghsa_id = data.get("ghsa_id", "N/A")
+    cve_id = data.get("cve_id", "N/A")
+    severity = data.get("severity", "unknown")
+    summary = data.get("summary", "")
+    description = data.get("description", "")
+    published = data.get("published_at", "N/A")
+    updated = data.get("updated_at", "N/A")
+    withdrawn = data.get("withdrawn_at")
+    html_url = data.get("html_url", "")
+
+    print(f"\n{'=' * 70}")
+    print(f"  GitHub Advisory: {ghsa_id}")
+    print(f"{'=' * 70}")
+    print(f"  CVE:        {cve_id}")
+    print(f"  Severity:   {severity.upper()}")
+    print(f"  Published:  {published}")
+    print(f"  Updated:    {updated}")
+    if withdrawn:
+        print(f"  Withdrawn:  {withdrawn}")
+    if html_url:
+        print(f"  URL:        {html_url}")
+    print()
+
+    # CVSS
+    cvss = data.get("cvss") or {}
+    if cvss.get("score"):
+        print(f"  CVSS Score:  {cvss['score']}")
+    if cvss.get("vector_string"):
+        print(f"  CVSS Vector: {cvss['vector_string']}")
+    if cvss:
+        print()
+
+    # CWEs
+    cwes = data.get("cwes") or []
+    if cwes:
+        cwe_strs = [f"{c.get('cwe_id', '?')} — {c.get('name', '')}" for c in cwes]
+        print("  CWEs:")
+        for c in cwe_strs:
+            print(f"    • {c}")
+        print()
+
+    # Summary + description
+    if summary:
+        print(f"  Summary:\n    {summary}")
+        print()
+    if description:
+        # Truncate very long descriptions for terminal readability
+        desc_lines = description.strip().splitlines()
+        if len(desc_lines) > 20:
+            desc_lines = desc_lines[:20] + ["    ... (truncated, use --output json for full text)"]
+        print("  Description:")
+        for line in desc_lines:
+            print(f"    {line}")
+        print()
+
+    # Affected packages (vulnerabilities)
+    vulnerabilities = data.get("vulnerabilities") or []
+    if vulnerabilities:
+        print("  Affected Packages:")
+        print(f"  {'-' * 50}")
+        for vuln in vulnerabilities:
+            pkg = vuln.get("package") or {}
+            ecosystem = pkg.get("ecosystem", "?")
+            name = pkg.get("name", "?")
+            vr = vuln.get("vulnerable_version_range", "N/A")
+            patched = vuln.get("patched_versions") or vuln.get("first_patched_version")
+            if isinstance(patched, dict):
+                patched = patched.get("identifier", "N/A")
+            if not patched:
+                patched = "(no patch available)"
+            print(f"    {ecosystem}/{name}")
+            print(f"      Vulnerable: {vr}")
+            print(f"      Patched:    {patched}")
+        print()
+
+    # References
+    references = data.get("references") or []
+    if references:
+        print("  References:")
+        for ref in references[:10]:
+            if isinstance(ref, str):
+                print(f"    • {ref}")
+            elif isinstance(ref, dict):
+                print(f"    • {ref.get('url', ref)}")
+        if len(references) > 10:
+            print(f"    ... and {len(references) - 10} more")
+        print()
+
+    # Credits
+    credits_list = data.get("credits") or []
+    if credits_list:
+        print("  Credits:")
+        for credit in credits_list[:5]:
+            login = credit.get("login", "unknown") if isinstance(credit, dict) else str(credit)
+            ctype = credit.get("type", "") if isinstance(credit, dict) else ""
+            suffix = f" ({ctype})" if ctype else ""
+            print(f"    • {login}{suffix}")
+        print()
+
+
+def _run_advisory(argv: list[str]) -> int:
+    parser = _build_advisory_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_github_advisory import fetch_github_advisory
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    data = fetch_github_advisory(cve_id)
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(data, indent=2))
+        return 0
+
+    # --- text output ---
+    if data.get("error"):
+        print(f"[error] {data['error']}", file=sys.stderr)
+        return 1
+
+    if not data.get("found"):
+        print(data.get("message", f"No advisory found for {cve_id}."))
+        return 0
+
+    _print_advisory_text(data)
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2430,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "advisory":
+        idx = argv.index("advisory")
+        sys.exit(_run_advisory(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
