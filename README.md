@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [advisory](#manus-agent-advisory-cve-id--github-security-advisory)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -341,6 +342,17 @@ Blast-radius labels per package:
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent advisory <CVE-ID>` — GitHub Security Advisory
+
+```bash
+manus-agent advisory CVE-2024-3094
+manus-agent advisory CVE-2023-44487 --output json | jq .vulnerabilities
+```
+
+Fetches the GitHub Security Advisory (GHSA) for a CVE from the public GitHub Advisory Database. Displays severity, CVSS score/vector, affected packages with vulnerable version ranges and patched versions, CWE classifications, references, and credits.
 
 ---
 
