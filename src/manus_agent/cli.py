@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-week",
     "changelog",
     "blast-radius",
 }
@@ -1524,6 +1525,129 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         date = (r.get("published") or "")[:col_date]
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# poc-week subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_week_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-week",
+        description=(
+            "Fetch the PoC Week digest — a curated list of trending CVEs with\n"
+            "public Proof-of-Concept exploits, ranked by community mention count.\n"
+            "Data sourced from tonyharris.io/poc-week/."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "date",
+        nargs="?",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Target date (auto-rounds to nearest Sunday). Defaults to latest available.",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Show only the top N entries (0 = all, default: all)",
+    )
+    p.add_argument(
+        "--new-only",
+        action="store_true",
+        default=False,
+        help="Show only entries marked NEW this week",
+    )
+    return p
+
+
+def _run_poc_week(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+
+    parser = _build_poc_week_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.get_poc_week import get_poc_week
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = get_poc_week(args.date)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    cves = result.get("cves", [])
+
+    # Apply filters
+    if args.new_only:
+        cves = [c for c in cves if c.get("is_new")]
+
+    if args.limit > 0:
+        cves = cves[: args.limit]
+
+    if args.output == "json":
+        output = {
+            "week_date": result.get("week_date"),
+            "url": result.get("url"),
+            "total": result.get("total", 0),
+            "shown": len(cves),
+            "cves": cves,
+        }
+        print(_json.dumps(output, indent=2))
+        return 0
+
+    # ---- text output ----
+    week_date = result.get("week_date", "unknown")
+    url = result.get("url", "")
+    total = result.get("total", 0)
+
+    print(f"PoC Week Digest — {week_date}")
+    print(f"  Source: {url}")
+    print(f"  Total CVEs this week: {total}")
+    if args.new_only:
+        print(f"  Showing: NEW entries only ({len(cves)})")
+    elif args.limit > 0:
+        print(f"  Showing: top {len(cves)} of {total}")
+    print()
+
+    if not cves:
+        print("No entries match the current filters.")
+        return 0
+
+    for entry in cves:
+        cve_id = entry.get("cve_id", "?")
+        rank = entry.get("mention_rank", "?")
+        severity = entry.get("severity") or "—"
+        products = entry.get("products") or "—"
+        desc = entry.get("description") or "—"
+        poc_urls = entry.get("poc_urls", [])
+        is_new = entry.get("is_new", False)
+
+        new_badge = " 🆕" if is_new else ""
+        print(f"  #{rank}  {cve_id}{new_badge}")
+        print(f"       Severity : {severity}")
+        print(f"       Products : {products}")
+        print(f"       Description: {desc[:120]}")
+        if poc_urls:
+            print(f"       PoC URLs : {poc_urls[0]}")
+            for u in poc_urls[1:]:
+                print(f"                  {u}")
+        print()
 
     return 0
 
@@ -2260,6 +2384,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-week":
+        idx = argv.index("poc-week")
+        sys.exit(_run_poc_week(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
