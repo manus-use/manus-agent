@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-freshness",
     "changelog",
     "blast-radius",
 }
@@ -1525,6 +1526,107 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
 
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# poc-freshness subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_freshness_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-freshness",
+        description=(
+            "Measure how recently PoC (proof-of-concept) activity occurred for a CVE.\n"
+            "Produces a 0-100 freshness score indicating ongoing attacker interest."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_poc_freshness(argv: list[str]) -> int:
+    parser = _build_poc_freshness_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.poc_freshness import (
+            _check_trickest,
+            _compute_freshness,
+            _count_nvd_exploit_refs,
+            _search_exploitdb,
+            _search_github_pocs,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    import re as _re
+
+    if not _re.match(r"^CVE-\d{4}-\d+$", cve_id, _re.IGNORECASE):
+        print(f"[error] Invalid CVE ID format: {cve_id!r}", file=sys.stderr)
+        return 1
+
+    # Gather signals
+    try:
+        github_repos = _search_github_pocs(cve_id)
+    except Exception:
+        github_repos = []
+
+    try:
+        trickest = _check_trickest(cve_id)
+    except Exception:
+        trickest = {"found": False, "poc_count": 0}
+
+    try:
+        exploitdb_entries = _search_exploitdb(cve_id)
+    except Exception:
+        exploitdb_entries = []
+
+    try:
+        nvd_refs = _count_nvd_exploit_refs(cve_id)
+    except Exception:
+        nvd_refs = 0
+
+    result = _compute_freshness(github_repos, trickest, exploitdb_entries, nvd_refs)
+    result["cve_id"] = cve_id
+
+    if args.output == "json":
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
+    # Text output
+    score = result["freshness_score"]
+    classification = result["classification"]
+    print(f"PoC Freshness for {cve_id}")
+    print(f"  Freshness Score : {score}/100")
+    print(f"  Classification  : {classification}")
+    print()
+    print("Signal Breakdown:")
+    for sig in result["signals"]:
+        print(f"  [{sig['source']}] score={sig['score']:.1f} -- {sig['detail']}")
+    if not result["signals"]:
+        print("  (no PoC activity signals detected)")
+    print()
+    print("Summary:")
+    print(f"  GitHub PoC repos     : {result['github_repos_found']}")
+    print(f"  Exploit-DB entries   : {result['exploitdb_entries_found']}")
+    trickest_str = "Yes" if result["trickest_indexed"] else "No"
+    if result["trickest_indexed"]:
+        trickest_str += f" ({result['trickest_poc_count']} URLs)"
+    print(f"  trickest/cve indexed : {trickest_str}")
+    print(f"  NVD exploit refs     : {result['nvd_exploit_refs']}")
     return 0
 
 
@@ -2260,6 +2362,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-freshness":
+        idx = argv.index("poc-freshness")
+        sys.exit(_run_poc_freshness(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
