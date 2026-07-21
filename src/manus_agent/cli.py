@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "silent-patches",
 }
 
 
@@ -1802,6 +1803,106 @@ def _build_blast_radius_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _run_silent_patches(argv: list[str]) -> int:
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="manus-agent silent-patches",
+        description="Detect silently patched security fixes in a GitHub repository.",
+    )
+    parser.add_argument("repo", help="GitHub repository in owner/repo format")
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Start date for commit scan (YYYY-MM-DD, default: 90 days ago)",
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="End date for commit scan (YYYY-MM-DD, default: today)",
+    )
+    parser.add_argument(
+        "--max-commits",
+        type=int,
+        default=500,
+        help="Hard limit on commits fetched (default: 500)",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Skip diff scoring (message keywords only)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.detect_silent_patches import detect_silent_patches
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        candidates = detect_silent_patches(
+            args.repo,
+            since=args.since,
+            until=args.until,
+            max_commits=args.max_commits,
+            fast=args.fast,
+        )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        # Strip full_message from JSON output to keep it concise
+        output_data = []
+        for c in candidates:
+            entry = {k: v for k, v in c.items() if k != "full_message"}
+            output_data.append(entry)
+        print(_json.dumps(output_data, indent=2))
+        return 0
+
+    # Text output
+    print()
+    print(f"Silent Patch Detector — {args.repo}")
+    print("=" * 60)
+    print(f"Scan window: {args.since or '(90 days ago)'} → {args.until or '(today)'}")
+    print(f"Mode: {'fast (message only)' if args.fast else 'full (message + diff)'}")
+    print(f"Candidates found: {len(candidates)}")
+    print()
+
+    if not candidates:
+        print("No silent patches detected in the scanned commits.")
+        return 0
+
+    for i, c in enumerate(candidates, 1):
+        score_bar = "█" * int(c["score"] * 10) + "░" * (10 - int(c["score"] * 10))
+        print(f"[{i}] {c['short_sha']}  {c['message']}")
+        print(f"    Score: {score_bar} {c['score']:.2f}  (msg={c['message_score']:.2f} diff={c['diff_score']:.2f})")
+        print(f"    Class: {c['classification']}  Author: {c['author']}  Date: {c['date'][:10]}")
+        print(f"    URL:   {c['url']}")
+        if len(c.get("matched_classes", [])) > 1:
+            print(f"    Also:  {', '.join(c['matched_classes'])}")
+        print()
+
+    # Summary
+    class_counts: dict[str, int] = {}
+    for c in candidates:
+        cls = c["classification"]
+        class_counts[cls] = class_counts.get(cls, 0) + 1
+    top_classes = sorted(class_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    print("Bug-class distribution:")
+    for cls, count in top_classes:
+        print(f"  {cls}: {count}")
+
+    return 0
+
+
 def _run_blast_radius(argv: list[str]) -> int:
     import json as _json
 
@@ -2268,6 +2369,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "silent-patches":
+        idx = argv.index("silent-patches")
+        sys.exit(_run_silent_patches(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
