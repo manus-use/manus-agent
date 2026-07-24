@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "verify-exploit",
 }
 
 
@@ -1421,6 +1422,436 @@ def _run_exploit_complexity(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# verify-exploit subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_verify_exploit_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent verify-exploit",
+        description=(
+            "Verify a Proof-of-Concept exploit in an isolated Docker environment.\n"
+            "Builds a vulnerable target from a Dockerfile and executes the exploit\n"
+            "code against it on an internal Docker network. Requires Docker.\n\n"
+            "Two execution modes:\n"
+            "  remote (default): exploit runs in a separate container attacking the\n"
+            "                    target over an isolated network.\n"
+            "  local:            exploit runs INSIDE the target container (for local\n"
+            "                    privilege escalation, file parsing bugs, etc.)."
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  manus-agent verify-exploit CVE-2024-3094 \\\n"
+            "      --dockerfile ./target.Dockerfile \\\n"
+            "      --exploit ./exploit.py --language python\n\n"
+            "  manus-agent verify-exploit CVE-2025-1234 \\\n"
+            "      --dockerfile ./Dockerfile --exploit ./exploit.sh \\\n"
+            "      --language bash --mode local\n\n"
+            "  manus-agent verify-exploit CVE-2024-9999 \\\n"
+            "      --dockerfile ./Dockerfile --exploit ./exploit.py \\\n"
+            "      --language python --port 8080 --timeout 600 \\\n"
+            "      --env SECRET_KEY=test --output json\n"
+        ),
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier (e.g. CVE-2024-3094)",
+    )
+    p.add_argument(
+        "--dockerfile",
+        required=True,
+        metavar="PATH",
+        help="Path to Dockerfile that sets up the vulnerable target environment",
+    )
+    p.add_argument(
+        "--exploit",
+        required=True,
+        metavar="PATH",
+        help="Path to the exploit code file",
+    )
+    p.add_argument(
+        "--language",
+        required=True,
+        choices=["python", "bash", "sh", "javascript", "ruby", "perl"],
+        help="Language/interpreter for the exploit code",
+    )
+    p.add_argument(
+        "--mode",
+        choices=["remote", "local"],
+        default="remote",
+        help="Exploit execution mode (default: remote)",
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=80,
+        metavar="PORT",
+        help="Port the target service listens on (default: 80, remote mode only)",
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Exploit execution timeout in seconds (default: 300)",
+    )
+    p.add_argument(
+        "--software",
+        default="unknown",
+        metavar="NAME",
+        help="Affected software name (for reporting)",
+    )
+    p.add_argument(
+        "--versions",
+        default="unknown",
+        metavar="RANGE",
+        help="Affected version range (for reporting)",
+    )
+    p.add_argument(
+        "--vuln-type",
+        default="unknown",
+        metavar="TYPE",
+        help="Vulnerability type, e.g. RCE, SQLi, XSS (for reporting)",
+    )
+    p.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Environment variable for the target container (repeatable)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_verify_exploit(argv: list[str]) -> int:  # noqa: C901
+    """Run the verify-exploit CLI subcommand."""
+    import re as _re
+    import time as _time
+
+    parser = _build_verify_exploit_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    # Read Dockerfile content
+    import pathlib
+
+    dockerfile_path = pathlib.Path(args.dockerfile)
+    if not dockerfile_path.is_file():
+        print(f"Error: Dockerfile not found: {args.dockerfile}", file=sys.stderr)
+        return 1
+
+    exploit_path = pathlib.Path(args.exploit)
+    if not exploit_path.is_file():
+        print(f"Error: Exploit file not found: {args.exploit}", file=sys.stderr)
+        return 1
+
+    dockerfile_content = dockerfile_path.read_text(encoding="utf-8")
+    exploit_code = exploit_path.read_text(encoding="utf-8")
+
+    # Parse environment variables
+    target_env: dict[str, str] = {}
+    for env_str in args.env:
+        if "=" not in env_str:
+            print(f"Error: Invalid --env format: {env_str!r} (expected KEY=VALUE)", file=sys.stderr)
+            return 1
+        key, value = env_str.split("=", 1)
+        target_env[key] = value
+
+    # Import sandbox components
+    try:
+        from manus_agent.sandbox.exploit_sandbox import (
+            ExploitSandbox,
+            InterpreterNotFoundError,
+        )
+        from manus_agent.utils.docker_client import (
+            DockerConnectionError,
+            get_docker_client,
+            is_transient_docker_error,
+            wait_for_container_healthy,
+            wait_for_container_running,
+        )
+    except ImportError as exc:
+        print(f"Error importing sandbox modules: {exc}", file=sys.stderr)
+        return 1
+
+    sandbox = ExploitSandbox(timeout=args.timeout)
+    start_time = _time.time()
+    result_data: dict = {
+        "cve_id": cve_id.upper(),
+        "mode": args.mode,
+        "language": args.language,
+        "port": args.port,
+        "timeout": args.timeout,
+        "software": args.software,
+        "versions": args.versions,
+        "vuln_type": args.vuln_type,
+    }
+
+    try:
+        # 0. Docker preflight
+        try:
+            client = get_docker_client()
+            client.ping()
+            client.close()
+        except DockerConnectionError as e:
+            elapsed = _time.time() - start_time
+            result_data.update(
+                verification_status="infra_error",
+                error=f"Docker daemon unavailable: {e.message}",
+                diagnosis=e.diagnosis,
+                remediation=e.remediation,
+                elapsed_seconds=round(elapsed, 2),
+            )
+            return _verify_exploit_output(result_data, args.output, status="infra_error")
+        except Exception as e:
+            elapsed = _time.time() - start_time
+            result_data.update(
+                verification_status="infra_error",
+                error=f"Docker daemon unavailable: {e}",
+                elapsed_seconds=round(elapsed, 2),
+            )
+            return _verify_exploit_output(result_data, args.output, status="infra_error")
+
+        # 1. Build target image
+        if args.output == "text":
+            print(f"[verify-exploit] Building target image for {cve_id.upper()}...")
+        try:
+            image_id = sandbox.build_target(dockerfile_content)
+        except Exception as e:
+            elapsed = _time.time() - start_time
+            result_data.update(
+                verification_status="build_error",
+                error=str(e),
+                build_log=sandbox.build_log or "",
+                elapsed_seconds=round(elapsed, 2),
+            )
+            return _verify_exploit_output(result_data, args.output, status="build_error")
+
+        # 2. Start target container
+        if args.output == "text":
+            print("[verify-exploit] Starting target container...")
+        try:
+            sandbox.start_target(image_id, environment=target_env or None)
+        except Exception as e:
+            elapsed = _time.time() - start_time
+            result_data.update(
+                verification_status="target_error",
+                error=str(e),
+                build_log=sandbox.build_log or "",
+                elapsed_seconds=round(elapsed, 2),
+            )
+            return _verify_exploit_output(result_data, args.output, status="target_error")
+
+        if args.mode == "remote":
+            # 3. Wait for target service
+            if args.output == "text":
+                print(f"[verify-exploit] Waiting for target on port {args.port}...")
+            ready = sandbox.wait_for_target(port=args.port, timeout=60)
+            if not ready:
+                elapsed = _time.time() - start_time
+                result_data.update(
+                    verification_status="target_error",
+                    error=f"Target service did not become ready on port {args.port} within 60s",
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status="target_error")
+
+            # 4. Run exploit (remote mode)
+            if args.output == "text":
+                print(f"[verify-exploit] Running exploit ({args.language}) in remote mode...")
+            env = {"TARGET_PORT": str(args.port)}
+            try:
+                exploit_result = sandbox.run_exploit(
+                    code=exploit_code,
+                    language=args.language,
+                    env=env,
+                )
+            except InterpreterNotFoundError as e:
+                elapsed = _time.time() - start_time
+                result_data.update(
+                    verification_status="infra_error",
+                    error=str(e),
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status="infra_error")
+            except Exception as e:
+                elapsed = _time.time() - start_time
+                status = "infra_error" if is_transient_docker_error(e) else "exploit_error"
+                result_data.update(
+                    verification_status=status,
+                    error=str(e),
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status=status)
+
+        else:  # local mode
+            # 3. Wait for container running/healthy
+            try:
+                if sandbox.target_container is not None:
+                    wait_for_container_running(sandbox.target_container, timeout=20)
+                    wait_for_container_healthy(sandbox.target_container, timeout=30)
+            except Exception as e:
+                elapsed = _time.time() - start_time
+                status = "infra_error" if is_transient_docker_error(e) else "target_error"
+                result_data.update(
+                    verification_status=status,
+                    error=str(e),
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status=status)
+
+            # 4. Run exploit (local mode, inside target)
+            if args.output == "text":
+                print(f"[verify-exploit] Running exploit ({args.language}) in local mode...")
+            try:
+                exploit_result = sandbox.run_local_exploit(
+                    code=exploit_code,
+                    language=args.language,
+                )
+            except InterpreterNotFoundError as e:
+                elapsed = _time.time() - start_time
+                result_data.update(
+                    verification_status="infra_error",
+                    error=str(e),
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status="infra_error")
+            except Exception as e:
+                elapsed = _time.time() - start_time
+                status = "infra_error" if is_transient_docker_error(e) else "exploit_error"
+                result_data.update(
+                    verification_status=status,
+                    error=str(e),
+                    target_logs=sandbox.get_target_logs() or "",
+                    elapsed_seconds=round(elapsed, 2),
+                )
+                return _verify_exploit_output(result_data, args.output, status=status)
+
+        # 5. Determine status
+        elapsed = _time.time() - start_time
+        exit_code = exploit_result.get("exit_code", -1)
+        target_logs = sandbox.get_target_logs() or ""
+
+        if exit_code == 0:
+            verification_status = "verified"
+        else:
+            verification_status = "failed"
+
+        result_data.update(
+            verification_status=verification_status,
+            exit_code=exit_code,
+            stdout=exploit_result.get("stdout", ""),
+            stderr=exploit_result.get("stderr", ""),
+            target_logs=target_logs,
+            elapsed_seconds=round(elapsed, 2),
+        )
+        return _verify_exploit_output(result_data, args.output, status=verification_status)
+
+    except Exception as e:
+        elapsed = _time.time() - start_time
+        result_data.update(
+            verification_status="infra_error",
+            error=f"Unexpected error: {e}",
+            elapsed_seconds=round(elapsed, 2),
+        )
+        return _verify_exploit_output(result_data, args.output, status="infra_error")
+    finally:
+        if args.output == "text":
+            print("[verify-exploit] Cleaning up containers...")
+        sandbox.cleanup()
+
+
+def _verify_exploit_output(data: dict, fmt: str, status: str) -> int:
+    """Format and print verify-exploit results. Returns exit code."""
+    import json as _json
+
+    if fmt == "json":
+        print(_json.dumps(data, indent=2, default=str))
+    else:
+        # Text output
+        cve_id = data.get("cve_id", "UNKNOWN")
+        elapsed = data.get("elapsed_seconds", 0)
+        mode = data.get("mode", "remote")
+
+        print()
+        if status == "verified":
+            print(f"  \u2705  EXPLOIT VERIFIED \u2014 {cve_id}")
+            print(f"  Mode: {mode} | Exit code: 0 | Time: {elapsed:.1f}s")
+            print(f"  Software: {data.get('software', 'unknown')} ({data.get('vuln_type', 'unknown')})")
+            print()
+            stdout = data.get("stdout", "")
+            if stdout:
+                print("  \u2500\u2500 Exploit stdout \u2500\u2500")
+                for line in stdout.splitlines()[:50]:
+                    print(f"    {line}")
+                if len(stdout.splitlines()) > 50:
+                    print(f"    ... ({len(stdout.splitlines()) - 50} more lines)")
+                print()
+        elif status == "failed":
+            exit_code = data.get("exit_code", -1)
+            print(f"  \u274c  EXPLOIT FAILED \u2014 {cve_id}")
+            print(f"  Mode: {mode} | Exit code: {exit_code} | Time: {elapsed:.1f}s")
+            print(f"  Software: {data.get('software', 'unknown')} ({data.get('vuln_type', 'unknown')})")
+            print()
+            stderr = data.get("stderr", "")
+            if stderr:
+                print("  \u2500\u2500 Exploit stderr \u2500\u2500")
+                for line in stderr.splitlines()[:30]:
+                    print(f"    {line}")
+                if len(stderr.splitlines()) > 30:
+                    print(f"    ... ({len(stderr.splitlines()) - 30} more lines)")
+                print()
+        elif status == "build_error":
+            print(f"  \U0001f528  BUILD ERROR \u2014 {cve_id}")
+            print(f"  {data.get('error', 'Unknown build error')}")
+            print()
+            build_log = data.get("build_log", "")
+            if build_log:
+                print("  \u2500\u2500 Build log (last 20 lines) \u2500\u2500")
+                for line in build_log.splitlines()[-20:]:
+                    print(f"    {line}")
+                print()
+        elif status == "target_error":
+            print(f"  \U0001f3af  TARGET ERROR \u2014 {cve_id}")
+            print(f"  {data.get('error', 'Unknown target error')}")
+            print()
+            target_logs = data.get("target_logs", "")
+            if target_logs:
+                print("  \u2500\u2500 Target logs (last 20 lines) \u2500\u2500")
+                for line in target_logs.splitlines()[-20:]:
+                    print(f"    {line}")
+                print()
+        else:  # infra_error
+            print(f"  \u2699\ufe0f  INFRA ERROR \u2014 {cve_id}")
+            print(f"  {data.get('error', 'Unknown infrastructure error')}")
+            if data.get("diagnosis"):
+                print(f"  Diagnosis: {data['diagnosis']}")
+            if data.get("remediation"):
+                print(f"  Remediation: {data['remediation']}")
+            print()
+
+    # Exit 0 only for verified; any other status is non-zero
+    return 0 if status == "verified" else 1
+
+
 # poc-search subcommand
 # ---------------------------------------------------------------------------
 
@@ -2260,6 +2691,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "verify-exploit":
+        idx = argv.index("verify-exploit")
+        sys.exit(_run_verify_exploit(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
