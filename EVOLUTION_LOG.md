@@ -107,3 +107,49 @@ Suite: **1206 passed** (was 1158 before this session series; +30 this PR).
   once this PR merges.
 - **Per-version CVE integration for CRAN** — `manus-agent blast-radius
   cran:openssl@2.1.1` should call `_fetch_osv_package_vulns("openssl", "CRAN", "2.1.1")`.
+
+---
+
+## PR #158 — Shared test conftest.py with reusable fixtures (2026-07-29)
+
+### What
+Added `tests/conftest.py` with shared pytest fixtures and `tests/test_conftest_fixtures.py`
+(50 tests) that validates and documents them.
+
+### Why
+30+ test files independently define their own mock factories (tool_use dicts,
+HTTP responses, NVD/EPSS/KEV payloads). This leads to duplicated helpers,
+inconsistent mock shapes, and higher friction when writing new tests. A shared
+conftest.py is the standard pytest solution.
+
+### Fixtures provided
+- `make_tool_use` — builds Strands tool_use dicts with auto-generated IDs
+- `mock_http_response` — creates mock requests.Response with raise_for_status()
+- `nvd_cve_factory` / `nvd_api_response` — builds NVD CVE payloads
+- `epss_data_factory` — builds EPSS API responses
+- `kev_catalog_factory` — builds CISA KEV catalog payloads
+- `osv_record_factory` — builds OSV.dev records
+- Config fixtures (default, bedrock, openai, anthropic, ollama)
+- `tmp_history_file` / `tmp_config_file` — temp filesystem helpers
+- `env_override` — clean monkeypatch wrapper
+- Module constants: `SAMPLE_CVE_LOG4SHELL`, `SAMPLE_CVE_XZ`
+
+### Results
+- 50 new fixture validation tests pass
+- All 1208 existing tests unchanged / passing
+- Ruff clean
+
+### Suggested next contributions
+
+- **`_run_changelog_generate` test coverage** — the changelog CLI tests
+  (`test_changelog_cli.py`) are comprehensive but `_run_changelog_generate`
+  could use edge-case tests for merge commits, non-conventional commits mixed
+  in, and empty repos.
+- **BrowserUseAgent.stream_async tests** — `stream_async()` uses asyncio.Queue
+  with step/done callbacks; no tests cover the streaming yield/queue pattern.
+- **WorkflowAgent / Orchestrator tests** — `Orchestrator.run()` currently just
+  delegates to WorkflowAgent; tests for the `TaskPlan`, `OrchestratorResult`,
+  and `AgentType` data structures + error handling.
+- **Refactor existing tests to use conftest fixtures** — once PR #158 merges,
+  existing test files can be simplified by replacing local helpers with shared
+  fixtures.
