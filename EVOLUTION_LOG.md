@@ -153,3 +153,48 @@ conftest.py is the standard pytest solution.
 - **Refactor existing tests to use conftest fixtures** — once PR #158 merges,
   existing test files can be simplified by replacing local helpers with shared
   fixtures.
+
+---
+
+## Contribution 6 — BrowserUseAgent.stream_async tests
+
+**PR:** #159
+**Branch:** `feat/test-stream-async-browser-agent`
+**File:** `tests/test_browser_use_stream_async.py` (+1548 lines)
+
+### Rationale
+
+`stream_async()` is a 165-line async generator with callbacks, queue management,
+error handling, and cleanup logic. Existing tests only covered the fallback path
+(2 tests when BrowserUse is None), leaving zero coverage of the real streaming
+path: step_callback, done_callback, queue draining, background task, keep_alive
+timeout, and finally-block cleanup.
+
+### What was added
+
+45 tests in 7 classes:
+- Fallback path (5): BrowserUse/BrowserProfile/Controller unavailable
+- True streaming path (11): callbacks, queue flow, extracted content, output_model
+- Error handling (7): constructor/LLM/callback failures, post-done exceptions
+- Browser cleanup (7): close(), keep_alive timeout, error resilience
+- Input handling (4): string/list/empty task parsing
+- Task cancellation (2): background task lifecycle
+- Configuration (4): headless, output_model, enable_memory, patch config
+- Edge cases (8): missing attributes, mixed types, validate_output
+
+### Results
+- 45 new tests pass
+- All 1203 tests pass (up from 1158), no regressions
+- Ruff clean
+
+### Suggested next contributions
+
+- **WorkflowAgent / Orchestrator tests** — `Orchestrator.run()` delegates to
+  WorkflowAgent; tests for `TaskPlan`, `OrchestratorResult`, `AgentType` data
+  structures + error handling.
+- **`_run_browser_task` tests** — the non-streaming browser task method has
+  complex try/finally with keep_alive/timeout logic worth covering.
+- **CLI `vendor-response` / `verify-exploit` subcommand tests** — several open
+  PRs add new subcommands but many lack unit tests for argument parsing.
+- **Refactor existing tests to use conftest fixtures** — once PR #158 merges,
+  existing test files can be simplified.
