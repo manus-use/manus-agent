@@ -853,6 +853,60 @@ def _check_import(package: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# Connectivity probes for `doctor --connectivity`
+# ---------------------------------------------------------------------------
+
+_API_ENDPOINTS: list[tuple[str, str, str | None]] = [
+    # (label, url, env_var_for_api_key)
+    ("NVD (NIST)", "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=1", "NVD_API_KEY"),
+    ("EPSS (FIRST)", "https://api.first.org/data/v1/epss?cve=CVE-2021-44228", None),
+    ("CISA KEV", "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", None),
+    ("OSV.dev", "https://api.osv.dev/v1/vulns/CVE-2021-44228", None),
+    ("GitHub API", "https://api.github.com/rate_limit", "GITHUB_TOKEN"),
+    ("VulnCheck", "https://api.vulncheck.com/v3/index/vulncheck-kev?cve=CVE-2021-44228", "VULNCHECK_API_KEY"),
+]
+
+
+def _probe_endpoints() -> list[tuple[str, bool, str]]:
+    """Probe each API endpoint and return (label, reachable, detail) tuples."""
+    import requests as _requests
+
+    results: list[tuple[str, bool, str]] = []
+    for label, url, env_key in _API_ENDPOINTS:
+        headers: dict[str, str] = {"User-Agent": "manus-agent/doctor"}
+        if env_key:
+            token = os.environ.get(env_key, "")
+            if env_key == "VULNCHECK_API_KEY" and token:
+                headers["Authorization"] = f"Bearer {token}"
+            elif env_key == "NVD_API_KEY" and token:
+                headers["apiKey"] = token
+            elif env_key == "GITHUB_TOKEN" and token:
+                headers["Authorization"] = f"token {token}"
+
+        try:
+            resp = _requests.get(url, headers=headers, timeout=10)
+            if resp.status_code < 400:
+                results.append((label, True, f"HTTP {resp.status_code}"))
+            elif resp.status_code == 401:
+                # Authentication issue but endpoint is reachable
+                results.append((label, True, f"HTTP {resp.status_code} (auth required)"))
+            elif resp.status_code == 403:
+                key_hint = f" (set {env_key})" if env_key and not os.environ.get(env_key) else ""
+                results.append((label, True, f"HTTP {resp.status_code} (forbidden{key_hint})"))
+            elif resp.status_code == 429:
+                results.append((label, True, "HTTP 429 (rate-limited but reachable)"))
+            else:
+                results.append((label, False, f"HTTP {resp.status_code}"))
+        except _requests.exceptions.Timeout:
+            results.append((label, False, "timeout (>10s)"))
+        except _requests.exceptions.ConnectionError:
+            results.append((label, False, "connection refused / DNS failure"))
+        except _requests.exceptions.RequestException as exc:
+            results.append((label, False, str(exc)[:60]))
+    return results
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Check packages, config, and environment variables."""
     console.print(
@@ -972,6 +1026,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             console.print("  [green]✓[/green] Docker daemon reachable")
         else:
             console.print("  [yellow]![/yellow] Docker installed but daemon not running")
+
+    # ------------------------------------------------------------------
+    # 5. API connectivity (optional, behind --connectivity flag)
+    # ------------------------------------------------------------------
+    if getattr(args, "connectivity", False):
+        console.print("\n[bold]API connectivity[/bold]")
+        probe_results = _probe_endpoints()
+        for label, reachable, detail in probe_results:
+            if reachable:
+                console.print(f"  [green]✓[/green] {label} — [dim]{detail}[/dim]")
+            else:
+                console.print(f"  [red]✗[/red] {label} — {detail}")
+                issues.append(f"Unreachable API: {label} ({detail})")
 
     # ------------------------------------------------------------------
     # Summary
@@ -1694,7 +1761,7 @@ def _run_changelog_generate(args: argparse.Namespace, root: "_Path") -> int:  # 
     if not commits:
         msg = f"No conventional commits found since {last_tag or 'beginning'}"
         if args.output == "json":
-            print(_json.dumps({"error": msg, "commits": []}), indent=2)
+            print(_json.dumps({"error": msg, "commits": []}, indent=2))
         else:
             print(msg, file=sys.stderr)
         return 0
@@ -2083,6 +2150,12 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to a config.toml file to validate (overrides default search paths)",
+    )
+    parser.add_argument(
+        "--connectivity",
+        action="store_true",
+        default=False,
+        help="Probe external API endpoints (NVD, EPSS, CISA KEV, OSV, GitHub, VulnCheck) to verify network access",
     )
     return parser
 
