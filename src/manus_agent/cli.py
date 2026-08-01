@@ -1802,6 +1802,122 @@ def _build_blast_radius_parser() -> argparse.ArgumentParser:
     return p
 
 
+# ---------------------------------------------------------------------------
+# manus-agent classify-refs
+# ---------------------------------------------------------------------------
+
+
+def _build_classify_refs_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the ``classify-refs`` subcommand."""
+    p = argparse.ArgumentParser(
+        prog="manus-agent classify-refs",
+        description=(
+            "Classify NVD reference URLs for a CVE into actionable categories: "
+            "patch, advisory, exploit, mailing_list, issue_tracker, vendor_notice, media, other."
+        ),
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier to classify references for (e.g. CVE-2024-3094)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    p.add_argument(
+        "--category",
+        metavar="CAT",
+        default=None,
+        help="Filter results to a specific category (e.g. patch, advisory, exploit)",
+    )
+    return p
+
+
+def _run_classify_refs(argv: list[str]) -> int:
+    """Run the classify-refs subcommand."""
+    import json as _json
+
+    from manus_agent.tools.classify_references import classify_cve_references
+
+    parser = _build_classify_refs_parser()
+    args = parser.parse_args(argv)
+
+    cve_id = args.cve_id.strip().upper()
+    if not cve_id.startswith("CVE-"):
+        console.print("[red]\u2717 Invalid CVE ID format. Must be like CVE-YYYY-NNNN.[/red]")
+        return 1
+
+    console.print(f"[bold blue]Classifying references for {cve_id}[/bold blue]")
+
+    with console.status(f"Fetching NVD references for {cve_id}\u2026", spinner="dots"):
+        data = classify_cve_references(cve_id)
+
+    if "error" in data:
+        console.print(f"[red]\u2717 {data['error']}[/red]")
+        return 1
+
+    references = data["references"]
+
+    # Apply category filter if specified
+    if args.category:
+        references = [r for r in references if r["category"] == args.category.lower()]
+
+    if args.output == "json":
+        output_data = {
+            "cve_id": data["cve_id"],
+            "total": data["total"],
+            "summary": data["summary"],
+            "references": references,
+            "actionable": data["actionable"],
+        }
+        console.print_json(_json.dumps(output_data, indent=2))
+    else:
+        # Text output with Rich formatting
+        summary = data["summary"]
+        console.print(f"\n[bold]Summary[/bold] ({data['total']} references):")
+        for cat, count in sorted(summary.items(), key=lambda x: -x[1]):
+            emoji = {
+                "patch": "\U0001f529",
+                "advisory": "\U0001f4cb",
+                "exploit": "\u26a0\ufe0f",
+                "mailing_list": "\U0001f4e8",
+                "issue_tracker": "\U0001f41b",
+                "vendor_notice": "\U0001f4e2",
+                "media": "\U0001f4f0",
+                "other": "\u2022",
+            }.get(cat, "\u2022")
+            console.print(f"  {emoji} {cat}: {count}")
+
+        # Show actionable references prominently
+        actionable = data["actionable"]
+        if actionable:
+            console.print(f"\n[bold green]Actionable ({len(actionable)}):[/bold green]")
+            for ref in actionable:
+                tag_str = f" [dim]({', '.join(ref['nvd_tags'])})[/dim]" if ref["nvd_tags"] else ""
+                console.print(f"  [green]\u2714[/green] [{ref['category']}] {ref['url']}{tag_str}")
+
+        # Show remaining references grouped by category
+        if references:
+            console.print(f"\n[bold]All references ({len(references)}):[/bold]")
+            for ref in references:
+                conf_color = {"high": "green", "medium": "yellow", "low": "dim"}.get(ref["confidence"], "dim")
+                tag_str = f" ({', '.join(ref['nvd_tags'])})" if ref["nvd_tags"] else ""
+                console.print(
+                    f"  [{conf_color}]\u25cf[/{conf_color}] [{ref['category']}] "
+                    f"{ref['url']} [{conf_color}]{ref['confidence']}[/{conf_color}]{tag_str}"
+                )
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# manus-agent blast-radius
+# ---------------------------------------------------------------------------
+
+
 def _run_blast_radius(argv: list[str]) -> int:
     import json as _json
 
@@ -2264,6 +2380,10 @@ def main() -> None:
     if first_positional == "changelog":
         idx = argv.index("changelog")
         sys.exit(_run_changelog(argv[idx + 1 :]))
+
+    if first_positional == "classify-refs":
+        idx = argv.index("classify-refs")
+        sys.exit(_run_classify_refs(argv[idx + 1 :]))
 
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
