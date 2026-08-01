@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "decode-cvss",
 }
 
 
@@ -1802,6 +1803,142 @@ def _build_blast_radius_parser() -> argparse.ArgumentParser:
     return p
 
 
+# ---------------------------------------------------------------------------
+# decode-cvss subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_decode_cvss_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent decode-cvss",
+        description=(
+            "Decode and explain a CVSS v3.0/v3.1 vector string. "
+            "Accepts a vector string (CVSS:3.1/AV:N/...) or a CVE ID to fetch from NVD."
+        ),
+    )
+    p.add_argument(
+        "input",
+        metavar="VECTOR_OR_CVE",
+        help=(
+            "A CVSS v3.x vector string (e.g. 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H') "
+            "or a CVE ID (e.g. 'CVE-2024-3094') to fetch the vector from NVD."
+        ),
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_decode_cvss(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_decode_cvss_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.decode_cvss_vector import decode_cvss_vector
+    except ImportError as exc:
+        console.print(f"[red]\u2717 decode_cvss_vector tool unavailable: {exc}[/red]")
+        return 1
+
+    input_str = args.input
+
+    with console.status(f"Decoding CVSS vector for {input_str}\u2026", spinner="dots"):
+        result = decode_cvss_vector(input_str)
+
+    if "error" in result:
+        console.print(f"[red]\u2717 {result['error']}[/red]")
+        return 1
+
+    if args.output == "json":
+        console.print_json(_json.dumps(result, indent=2))
+        return 0
+
+    # Text output
+    from rich.table import Table
+
+    # Header
+    severity = result.get("severity", "Unknown")
+    score = result.get("base_score", 0.0)
+    vector = result.get("vector", "")
+    version = result.get("version", "3.1")
+    cve_id = result.get("cve_id")
+
+    severity_colors = {
+        "Critical": "bold red",
+        "High": "red",
+        "Medium": "yellow",
+        "Low": "green",
+        "None": "dim",
+    }
+    sev_style = severity_colors.get(severity, "white")
+
+    title = f"CVSS v{version} Decode"
+    if cve_id:
+        title += f" — {cve_id}"
+    console.print(f"\n[bold]{title}[/bold]")
+    console.print(f"  Vector:   [cyan]{vector}[/cyan]")
+    console.print(f"  Score:    [{sev_style}]{score} {severity.upper()}[/{sev_style}]")
+    console.print()
+
+    # Metrics table
+    table = Table(
+        title="Metric Breakdown",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("Metric", style="cyan", width=22)
+    table.add_column("Value", style="yellow", width=12)
+    table.add_column("Explanation", style="white")
+
+    for m in result.get("metrics", []):
+        table.add_row(
+            m["metric"],
+            m["value"],
+            m["explanation"][:100],
+        )
+
+    console.print(table)
+    console.print()
+
+    # Attack summary
+    attack_summary = result.get("attack_summary", "")
+    if attack_summary:
+        console.print("[bold]Attack Summary:[/bold]")
+        console.print(f"  {attack_summary}")
+        console.print()
+
+    # Remediation priority
+    priority = result.get("remediation_priority", {})
+    if priority:
+        urgency = priority.get("urgency", "")
+        guidance = priority.get("guidance", "")
+        factors = priority.get("escalation_factors", [])
+
+        urgency_colors = {
+            "IMMEDIATE": "bold red",
+            "HIGH": "red",
+            "MODERATE": "yellow",
+            "LOW": "green",
+            "INFORMATIONAL": "dim",
+        }
+        urg_style = urgency_colors.get(urgency, "white")
+
+        console.print("[bold]Remediation Priority:[/bold]")
+        console.print(f"  Urgency:  [{urg_style}]{urgency}[/{urg_style}]")
+        console.print(f"  Guidance: {guidance}")
+        if factors:
+            console.print("  [bold]Escalation Factors:[/bold]")
+            for f in factors:
+                console.print(f"    \u26a0  {f}")
+
+    return 0
+
+
 def _run_blast_radius(argv: list[str]) -> int:
     import json as _json
 
@@ -2268,6 +2405,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "decode-cvss":
+        idx = argv.index("decode-cvss")
+        sys.exit(_run_decode_cvss(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
