@@ -240,3 +240,26 @@ Documented in test.
   dedup/sort logic; existing `test_search_poc_sources.py` only covers basic cases
 - **Cache robustness fix PR** — wrap `json.loads()` in `_get_kev_data` with
   try/except to gracefully handle corrupted cache
+
+## 2026-08-01 — PR #112 (updated): decode-cvss vector decoder/explainer tool
+
+**What:** New `decode_cvss_vector` tool + `decode-cvss` CLI subcommand that parses CVSS v3.0/v3.1 vector strings and produces structured breakdowns with:
+- Per-metric human-readable explanations
+- Computed base score (exact CVSS v3.1 formula)
+- Severity classification
+- Natural-language attack summary
+- Remediation priority with escalation factors
+
+**Why:** The project collects CVSS vectors from multiple sources (NVD, VulnCheck, patch-diff) but never explains what they mean. This fills the gap between raw scores and actionable security context.
+
+**Tests:** +70 new tests (1228 total passing, up from 1158 baseline)
+**Branch:** feat/cvss-vector-decoder
+**PR:** https://github.com/manus-use/manus-agent/pull/112
+
+## 2026-08-02 — PR #170: cve-enrich tool + CLI subcommand
+
+**Branch:** `feat/cve-enrich`
+**What:** Lightweight multi-source CVE enrichment tool that fetches NVD, EPSS, CISA KEV, OSV.dev, and VulnCheck data in parallel. Returns unified risk snapshot with composite scoring. No LLM agent required.
+**CLI:** `manus-agent enrich CVE-XXXX-YYYY [--output json|text] [--no-vulncheck]`
+**Tests:** +43 new tests (all fetchers, risk computation, CLI modes, Strands interface)
+**Suggested next:** test suite for `_run_discover` CLI execution (VulnerabilityDiscoveryAgent mocking), or `Config.from_file()` edge cases, or `obtain_cves.py` unit tests
