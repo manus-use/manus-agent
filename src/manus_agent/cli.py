@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "enrich",
 }
 
 
@@ -1764,6 +1765,162 @@ def _run_changelog_generate(args: argparse.Namespace, root: "_Path") -> int:  # 
 
 
 # ---------------------------------------------------------------------------
+# enrich subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_enrich_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent enrich",
+        description=(
+            "Quick multi-source CVE enrichment. Fetches NVD, EPSS, CISA KEV, OSV,\n"
+            "and VulnCheck data in parallel and returns a unified risk snapshot.\n"
+            "No LLM agent required — pure API aggregation."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier to enrich (e.g. CVE-2024-3094)",
+    )
+    p.add_argument(
+        "--no-vulncheck",
+        action="store_true",
+        default=False,
+        help="Skip VulnCheck KEV lookup (useful when no API key is set)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_enrich(argv: list[str]) -> int:
+    """Run the CVE enrichment pipeline and display results."""
+    parser = _build_enrich_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not re.match(r"^CVE-\d{4}-\d{4,}$", cve_id):
+        console.print(f"[red]\u2717 Invalid CVE ID format: {cve_id}[/red]")
+        return 1
+
+    try:
+        from manus_agent.tools.cve_enrich import enrich_cve
+    except ImportError as exc:
+        console.print(f"[red]\u2717 Failed to import enrich module: {exc}[/red]")
+        return 1
+
+    include_vc = not args.no_vulncheck
+
+    with console.status(f"Enriching {cve_id}\u2026", spinner="dots"):
+        result = enrich_cve(cve_id, include_vulncheck=include_vc)
+
+    if "error" in result:
+        console.print(f"[red]\u2717 {result['error']}[/red]")
+        return 1
+
+    if args.output == "json":
+        console.print_json(json.dumps(result, default=str))
+        return 0
+
+    # Text output
+    risk = result.get("risk_assessment", {})
+    nvd = result.get("nvd", {})
+    epss = result.get("epss", {})
+    cisa = result.get("cisa_kev", {})
+    osv = result.get("osv", {})
+    vc = result.get("vulncheck_kev", {})
+
+    # Risk banner
+    level = risk.get("level", "unknown").upper()
+    level_colors = {
+        "CRITICAL": "bold red",
+        "HIGH": "red",
+        "MEDIUM": "yellow",
+        "LOW": "green",
+        "UNKNOWN": "dim",
+    }
+    color = level_colors.get(level, "dim")
+    console.print(f"\n[{color}]\u25cf Risk: {level}[/{color}] (score: {risk.get('score', '?')})")
+    for sig in risk.get("signals", []):
+        console.print(f"  \u2022 {sig}")
+
+    # NVD section
+    console.print("\n[bold]NVD[/bold]")
+    if nvd.get("error"):
+        console.print(f"  [red]\u2717 {nvd['error']}[/red]")
+    else:
+        console.print(f"  CVSS: {nvd.get('cvss_score', 'N/A')} ({nvd.get('cvss_severity', 'N/A')})")
+        console.print(f"  CWE: {', '.join(nvd.get('cwe_ids', [])) or 'N/A'}")
+        console.print(f"  Published: {nvd.get('published', 'N/A')}")
+        console.print(f"  Status: {nvd.get('status', 'N/A')}")
+        desc = nvd.get("description", "")
+        if desc:
+            truncated = desc[:200] + "\u2026" if len(desc) > 200 else desc
+            console.print(f"  Description: {truncated}")
+
+    # EPSS section
+    console.print("\n[bold]EPSS[/bold]")
+    if epss.get("error"):
+        console.print(f"  [red]\u2717 {epss['error']}[/red]")
+    elif epss.get("score") is not None:
+        console.print(f"  Score: {epss['score']:.4f} (percentile: {epss.get('percentile', 0):.2%})")
+    else:
+        console.print("  [dim]No EPSS data available[/dim]")
+
+    # CISA KEV section
+    console.print("\n[bold]CISA KEV[/bold]")
+    if cisa.get("error"):
+        console.print(f"  [red]\u2717 {cisa['error']}[/red]")
+    elif cisa.get("in_kev"):
+        console.print("  [bold red]\u26a0 ACTIVELY EXPLOITED[/bold red]")
+        console.print(f"  Vendor: {cisa.get('vendor', 'N/A')} | Product: {cisa.get('product', 'N/A')}")
+        console.print(f"  Added: {cisa.get('date_added', 'N/A')} | Due: {cisa.get('due_date', 'N/A')}")
+        if cisa.get("known_ransomware_use", "Unknown") != "Unknown":
+            console.print(f"  Ransomware: {cisa['known_ransomware_use']}")
+    else:
+        console.print("  [green]Not in CISA KEV[/green]")
+
+    # OSV section
+    console.print("\n[bold]OSV (affected packages)[/bold]")
+    if osv.get("error"):
+        console.print(f"  [red]\u2717 {osv['error']}[/red]")
+    elif not osv.get("found"):
+        console.print("  [dim]No OSV record found[/dim]")
+    else:
+        pkgs = osv.get("affected_packages", [])
+        if not pkgs:
+            console.print("  [dim]No package-level data in OSV[/dim]")
+        else:
+            for pkg in pkgs[:10]:
+                fixed = ", ".join(pkg.get("fixed_versions", [])) or "none listed"
+                console.print(f"  \u2022 {pkg.get('ecosystem', '?')}:{pkg.get('name', '?')} (fixed: {fixed})")
+            if len(pkgs) > 10:
+                console.print(f"  \u2026 and {len(pkgs) - 10} more")
+
+    # VulnCheck section
+    if include_vc:
+        console.print("\n[bold]VulnCheck KEV[/bold]")
+        if vc.get("error"):
+            console.print(f"  [red]\u2717 {vc['error']}[/red]")
+        elif not vc.get("available"):
+            console.print("  [dim]Skipped (no API key)[/dim]")
+        elif vc.get("in_kev"):
+            console.print("  [bold red]\u26a0 In VulnCheck KEV[/bold red]")
+            console.print(f"  Maturity: {vc.get('exploit_maturity', 'N/A')}")
+        else:
+            console.print("  [green]Not in VulnCheck KEV[/green]")
+
+    console.print()
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # blast-radius subcommand
 # ---------------------------------------------------------------------------
 
@@ -2264,6 +2421,10 @@ def main() -> None:
     if first_positional == "changelog":
         idx = argv.index("changelog")
         sys.exit(_run_changelog(argv[idx + 1 :]))
+
+    if first_positional == "enrich":
+        idx = argv.index("enrich")
+        sys.exit(_run_enrich(argv[idx + 1 :]))
 
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
