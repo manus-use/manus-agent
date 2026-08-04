@@ -149,14 +149,17 @@ def get_nvd_data(tool: ToolUse, **kwargs: Any) -> ToolResult:
 
         vulnerability_data = data["vulnerabilities"][0]
 
-        # Extract CISA KEV information if available
+        # Extract CISA KEV information if available.
+        # NVD API v2.0 exposes CISA KEV fields as top-level keys in the
+        # "cve" object (cisaExploitAdd, cisaRequiredAction, cisaActionDue),
+        # NOT inside the "vulnStatus" string.
+        cve_obj = vulnerability_data.get("cve", {})
         cisa_kev_info = {"is_in_kev": False}
-        if "cisaExploitAdd" in vulnerability_data.get("cve", {}).get("vulnStatus", ""):
+        if "cisaExploitAdd" in cve_obj:
             cisa_kev_info["is_in_kev"] = True
-            cisa_kev_info["date_added"] = vulnerability_data["cve"]["cisaExploitAdd"]
-            cisa_kev_info["required_action"] = vulnerability_data["cve"]["cisaRequiredAction"]
-            cisa_kev_info["due_date"] = vulnerability_data["cve"]["cisaActionDue"]
-            # Add other relevant CISA fields if they exist and are needed
+            cisa_kev_info["date_added"] = cve_obj["cisaExploitAdd"]
+            cisa_kev_info["required_action"] = cve_obj.get("cisaRequiredAction", "")
+            cisa_kev_info["due_date"] = cve_obj.get("cisaActionDue", "")
 
         # Add CISA KEV info to the main vulnerability data
         vulnerability_data["cisa_kev_info"] = cisa_kev_info
