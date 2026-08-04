@@ -263,3 +263,17 @@ Documented in test.
 **CLI:** `manus-agent enrich CVE-XXXX-YYYY [--output json|text] [--no-vulncheck]`
 **Tests:** +43 new tests (all fetchers, risk computation, CLI modes, Strands interface)
 **Suggested next:** test suite for `_run_discover` CLI execution (VulnerabilityDiscoveryAgent mocking), or `Config.from_file()` edge cases, or `obtain_cves.py` unit tests
+
+## 2026-08-03 — PR #172: Config._apply_env_overrides() + from_file() tests
+
+**Branch:** `feat/test-config-env-overrides`
+**What:** Comprehensive test suite for the untested environment-variable → config mapping pipeline. Tests `_apply_env_overrides()` (Pydantic model validator), `Config.from_file()` search-path logic, and `_load_dotenv()` behavior.
+**Tests:** +66 new tests covering:
+- MANUS_LLM_* always-override semantics (provider, model, base_url, temperature, max_tokens)
+- API key fill-when-None semantics (OPENAI_API_KEY, ANTHROPIC_API_KEY per provider)
+- AWS region resolution priority (MANUS_AWS_REGION > AWS_DEFAULT_REGION > AWS_REGION)
+- Integration env vars (OTX, GitHub, Lark, Webhooks, MCP)
+- from_file() search paths (CWD, config/, ~/.manus-agent/)
+- _load_dotenv() search, priority, override=False, missing-dotenv graceful no-op
+- Combined: full env-only, partial override, empty-string-as-unset
+**Suggested next:** test suite for `_cmd_doctor` execution logic (check_import, provider checks, docker/playwright probing), or `_run_discover` CLI execution (VulnerabilityDiscoveryAgent mocking), or `browser_agent_tool` wrapper tests
