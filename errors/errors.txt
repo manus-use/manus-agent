@@ -1,0 +1,110 @@
+
+[2026-08-05T08:07:56.299651] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
+
+[2026-08-05T08:08:24.494343] Python REPL Error:
+Code:
+import time; time.sleep(9999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 5.0s timeout
+
+
+[2026-08-05T08:08:24.613448] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
+
+[2026-08-05T08:08:44.196521] Python REPL Error:
+Code:
+import time; time.sleep(9999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 5.0s timeout
+
+
+[2026-08-05T08:08:44.318625] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
+
+[2026-08-05T08:08:56.568729] Python REPL Error:
+Code:
+import time; time.sleep(9999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 5.0s timeout
+
+
+[2026-08-05T08:08:56.688459] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
+
+[2026-08-05T08:09:16.247223] Python REPL Error:
+Code:
+import time; time.sleep(9999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 5.0s timeout
+
+
+[2026-08-05T08:09:16.366650] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
+
+[2026-08-05T08:09:27.835984] Python REPL Error:
+Code:
+import time; time.sleep(9999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 5.0s timeout
+
+
+[2026-08-05T08:09:27.954767] Python REPL Error:
+Code:
+import time; time.sleep(999)
+Error:
+Traceback (most recent call last):
+  File "/tmp/manus-agent-wt/src/manus_agent/tools/python_repl.py", line 311, in python_repl
+    raise TimeoutError(f"Python REPL execution exceeded {timeout_seconds:.1f}s timeout")
+TimeoutError: Python REPL execution exceeded 1.0s timeout
+
