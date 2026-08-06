@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cve-neighbors",
 }
 
 
@@ -1935,6 +1936,93 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cve-neighbors subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cve_neighbors_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cve-neighbors",
+        description=(
+            "Find other CVEs affecting the same product or package.\n"
+            "Useful for batch patching — if you are fixing one vulnerability,\n"
+            "you should fix its neighbors at the same time."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier to find neighbors for (e.g. CVE-2021-44228)",
+    )
+    p.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Maximum number of neighbor CVEs to return (default: 10, max: 50)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cve_neighbors(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_cve_neighbors_parser()
+    args = parser.parse_args(argv)
+
+    cve_id = args.cve_id.strip().upper()
+    if not cve_id.startswith("CVE-"):
+        print(f"Error: Invalid CVE ID format: {cve_id!r}", file=sys.stderr)
+        return 1
+
+    max_results = min(max(args.max_results, 1), 50)
+
+    from manus_agent.tools.get_cve_neighbors import get_cve_neighbors
+
+    tool_input: dict = {
+        "toolUseId": "cli-cve-neighbors",
+        "input": {"cve_id": cve_id, "max_results": max_results},
+    }
+
+    result = get_cve_neighbors(tool_input)
+    status = result.get("status", "error")
+    content = result.get("content", [])
+
+    if status == "error":
+        error_text = content[0].get("text", "Unknown error") if content else "Unknown error"
+        print(f"Error: {error_text}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        # Find the JSON content block
+        json_block = None
+        for item in content:
+            if "json" in item:
+                json_block = item["json"]
+                break
+        if json_block:
+            print(_json.dumps(json_block, indent=2))
+        else:
+            # Fall back to text content as JSON
+            text_content = next((c.get("text", "") for c in content if "text" in c), "")
+            print(_json.dumps({"cve_id": cve_id, "result": text_content}, indent=2))
+    else:
+        # Text output
+        for item in content:
+            if "text" in item:
+                print(item["text"])
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2356,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cve-neighbors":
+        idx = argv.index("cve-neighbors")
+        sys.exit(_run_cve_neighbors(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
