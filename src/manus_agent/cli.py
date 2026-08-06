@@ -1802,6 +1802,179 @@ def _build_blast_radius_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _run_watchlist(argv: list[str]) -> int:
+    """CVE watchlist management CLI."""
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="manus-agent watchlist",
+        description="Manage a persistent CVE watchlist with bulk EPSS + KEV status updates.",
+    )
+    sub = parser.add_subparsers(dest="subaction")
+
+    # watchlist add
+    add_p = sub.add_parser("add", help="Add CVEs to the watchlist")
+    add_p.add_argument("cve_ids", nargs="+", metavar="CVE-ID", help="One or more CVE IDs")
+    add_p.add_argument("--note", default=None, help="Optional note/tag for these CVEs")
+
+    # watchlist remove
+    rm_p = sub.add_parser("remove", help="Remove CVEs from the watchlist")
+    rm_p.add_argument("cve_ids", nargs="+", metavar="CVE-ID", help="One or more CVE IDs")
+
+    # watchlist list
+    sub.add_parser("list", help="List all tracked CVEs")
+
+    # watchlist status
+    status_p = sub.add_parser("status", help="Fetch live EPSS + KEV status for all tracked CVEs")
+    status_p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    # watchlist clear
+    sub.add_parser("clear", help="Clear the entire watchlist")
+
+    args = parser.parse_args(argv)
+
+    if args.subaction is None:
+        parser.print_help()
+        return 1
+
+    from manus_agent.tools.cve_watchlist import watchlist_manage
+
+    if args.subaction == "add":
+        result = watchlist_manage("add", cve_ids=args.cve_ids, note=args.note)
+        if result.get("added"):
+            console.print(f"[green]Added:[/green] {', '.join(result['added'])}")
+        if result.get("duplicate"):
+            console.print(f"[yellow]Already tracked:[/yellow] {', '.join(result['duplicate'])}")
+        if result.get("invalid"):
+            console.print(f"[red]Invalid:[/red] {', '.join(result['invalid'])}")
+        console.print(f"[dim]Total tracked: {result['total']}[/dim]")
+        return 0
+
+    elif args.subaction == "remove":
+        result = watchlist_manage("remove", cve_ids=args.cve_ids)
+        if result.get("removed"):
+            console.print(f"[green]Removed:[/green] {', '.join(result['removed'])}")
+        if result.get("not_found"):
+            console.print(f"[yellow]Not found:[/yellow] {', '.join(result['not_found'])}")
+        console.print(f"[dim]Total tracked: {result['total']}[/dim]")
+        return 0
+
+    elif args.subaction == "list":
+        result = watchlist_manage("list")
+        if not result["entries"]:
+            console.print("[dim]Watchlist is empty. Add CVEs with: manus-agent watchlist add CVE-...[/dim]")
+            return 0
+        table = Table(
+            title=f"CVE Watchlist ({result['total']} entries)",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("CVE ID", style="cyan")
+        table.add_column("EPSS", style="yellow", width=8)
+        table.add_column("%ile", style="blue", width=8)
+        table.add_column("KEV", width=5)
+        table.add_column("Note", style="dim")
+        table.add_column("Added", style="dim", width=12)
+        for entry in result["entries"]:
+            epss_str = f"{entry['last_epss']:.4f}" if entry["last_epss"] is not None else "-"
+            pctl_str = f"{entry['last_percentile']:.2f}" if entry["last_percentile"] is not None else "-"
+            kev_str = (
+                "[red]YES[/red]" if entry["in_kev"] else "[green]no[/green]" if entry["in_kev"] is not None else "-"
+            )
+            added_str = entry["added_at"][:10] if entry["added_at"] else "-"
+            table.add_row(entry["cve_id"], epss_str, pctl_str, kev_str, entry["note"], added_str)
+        console.print(table)
+        if result["last_checked"]:
+            console.print(f"[dim]Last status check: {result['last_checked']}[/dim]")
+        return 0
+
+    elif args.subaction == "status":
+        output_fmt = args.output
+        if output_fmt == "json":
+            result = watchlist_manage("status")
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task(description="Fetching EPSS + KEV status...", total=None)
+                result = watchlist_manage("status")
+
+        if not result.get("entries"):
+            console.print("[dim]Watchlist is empty. Add CVEs with: manus-agent watchlist add CVE-...[/dim]")
+            return 0
+
+        if output_fmt == "json":
+            sys.stdout.write(_json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+            return 0
+
+        # Show changes first
+        if result.get("changes"):
+            console.print("\n[bold red]⚠ Changes detected since last check:[/bold red]")
+            for change in result["changes"]:
+                if change["type"] == "kev_added":
+                    console.print(f"  [red]🚨 {change['cve_id']} — ADDED TO CISA KEV[/red]")
+                elif change["type"] == "epss_spike":
+                    console.print(
+                        f"  [yellow]📈 {change['cve_id']} — EPSS spike: "
+                        f"{change['previous']:.4f} → {change['current']:.4f} "
+                        f"(+{change['delta']:.4f})[/yellow]"
+                    )
+                elif change["type"] == "epss_drop":
+                    console.print(
+                        f"  [green]📉 {change['cve_id']} — EPSS drop: "
+                        f"{change['previous']:.4f} → {change['current']:.4f} "
+                        f"({change['delta']:.4f})[/green]"
+                    )
+            console.print()
+
+        # Status table
+        table = Table(
+            title=f"Watchlist Status ({result['total']} CVEs)",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        table.add_column("CVE ID", style="cyan")
+        table.add_column("EPSS", style="yellow", width=8)
+        table.add_column("%ile", style="blue", width=8)
+        table.add_column("Δ", width=8)
+        table.add_column("KEV", width=5)
+        table.add_column("Note", style="dim")
+
+        for entry in result["entries"]:
+            epss_str = f"{entry['epss']:.4f}" if entry["epss"] is not None else "-"
+            pctl_str = f"{entry['percentile']:.2f}" if entry["percentile"] is not None else "-"
+            if entry["epss_delta"] is not None and entry["epss_delta"] != 0:
+                sign = "+" if entry["epss_delta"] > 0 else ""
+                delta_str = f"{sign}{entry['epss_delta']:.4f}"
+            else:
+                delta_str = "-"
+            kev_str = "[red]YES[/red]" if entry["in_kev"] else "[green]no[/green]"
+            table.add_row(entry["cve_id"], epss_str, pctl_str, delta_str, kev_str, entry.get("note", ""))
+
+        console.print(table)
+        summary = result["summary"]
+        console.print(
+            f"\n[dim]KEV: {summary['kev_count']}/{result['total']} | "
+            f"Avg EPSS: {summary['avg_epss']:.4f} | "
+            f"Checked: {summary['checked_at']}[/dim]"
+        )
+        return 0
+
+    elif args.subaction == "clear":
+        result = watchlist_manage("clear")
+        console.print(f"[yellow]Cleared {result['cleared']} entries from watchlist.[/yellow]")
+        return 0
+
+    return 1
+
+
 def _run_blast_radius(argv: list[str]) -> int:
     import json as _json
 
@@ -2268,6 +2441,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "watchlist":
+        idx = argv.index("watchlist")
+        sys.exit(_run_watchlist(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
