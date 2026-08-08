@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "export-sarif",
 }
 
 
@@ -2268,6 +2269,12 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "export-sarif":
+        from manus_agent.tools.export_sarif import run_export_sarif_cli
+
+        idx = argv.index("export-sarif")
+        sys.exit(run_export_sarif_cli(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
