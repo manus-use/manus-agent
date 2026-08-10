@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "sbom-scan",
 }
 
 
@@ -2050,6 +2051,117 @@ def _build_run_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ---------------------------------------------------------------------------
+# sbom-scan subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_sbom_scan_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent sbom-scan",
+        description=(
+            "Scan a CycloneDX or SPDX SBOM file for known vulnerabilities.\n"
+            "Queries OSV.dev in batch, enriches findings with EPSS and CISA KEV status,\n"
+            "and ranks results by KEV membership then EPSS score."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "bom_file",
+        metavar="BOM-FILE",
+        help="Path to SBOM file (CycloneDX JSON or SPDX JSON). Example: bom.json",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_sbom_scan(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_sbom_scan_parser()
+    args = parser.parse_args(argv)
+    bom_file = args.bom_file.strip()
+    if not bom_file:
+        parser.error("BOM-FILE is required")
+
+    try:
+        from manus_agent.tools.scan_sbom import scan_sbom_file
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        result = scan_sbom_file(bom_file)
+    except FileNotFoundError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"[error] SBOM scan failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+
+    # Text output
+    from rich.table import Table
+
+    console.print(
+        Panel(
+            f"[bold cyan]SBOM Scan Results[/bold cyan]\n"
+            f"Format: [yellow]{result['format']}[/yellow]  "
+            f"Components: [green]{result['total_components']}[/green]  "
+            f"Vulnerable: [red]{result['vulnerable_components']}[/red]  "
+            f"Findings: [red]{result['total_vulnerabilities']}[/red]  "
+            f"Critical: [bold red]{result['critical_count']}[/bold red]",
+            border_style="blue",
+        )
+    )
+
+    findings = result.get("findings", [])
+    if not findings:
+        console.print("[green]No known vulnerabilities found.[/green]")
+        return 0
+
+    table = Table(
+        title=f"Vulnerabilities ({len(findings)} findings)",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    table.add_column("ID", style="cyan", width=20)
+    table.add_column("Package", style="yellow", width=25)
+    table.add_column("Version", style="dim", width=12)
+    table.add_column("EPSS", style="blue", width=8)
+    table.add_column("KEV", width=5)
+    table.add_column("Summary", style="white", max_width=40)
+
+    for finding in findings[:50]:  # Cap display at 50
+        vuln_id = finding.get("cve_id") or finding.get("vuln_id", "")
+        pkg = finding.get("affected_package", "")
+        ver = finding.get("affected_version", "")
+        epss = f"{finding.get('epss', 0):.4f}"
+        kev = "[bold red]YES[/bold red]" if finding.get("in_kev") else "[dim]-[/dim]"
+        summary = (finding.get("summary", "") or "")[:60]
+        if len(finding.get("summary", "") or "") > 60:
+            summary += "…"
+        table.add_row(vuln_id, pkg, ver, epss, kev, summary)
+
+    console.print(table)
+
+    if len(findings) > 50:
+        console.print(f"[dim]... and {len(findings) - 50} more (use --output json for full list)[/dim]")
+
+    return 0
+
+
 def _build_init_parser() -> argparse.ArgumentParser:
     """Build the `init` subcommand parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2380,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "sbom-scan":
+        idx = argv.index("sbom-scan")
+        sys.exit(_run_sbom_scan(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
