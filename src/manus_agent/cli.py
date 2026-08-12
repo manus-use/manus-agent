@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "temporal-priority",
 }
 
 
@@ -1935,6 +1936,108 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# temporal-priority subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_temporal_priority_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent temporal-priority",
+        description=(
+            "Compute a temporal priority score (0–100) for a CVE combining CVSS base score, "
+            "current EPSS, EPSS spike recency, CISA KEV membership, patch availability, and "
+            "CVE age. Answers: 'given everything I know today, how urgent is this?'"
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_temporal_priority(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_temporal_priority_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.temporal_priority import compute_temporal_priority
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        data = compute_temporal_priority(cve_id)
+    except Exception as exc:
+        print(f"[error] Failed to compute temporal priority: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(data, indent=2))
+        return 0
+
+    # Text output
+    print()
+    print(f"Temporal Priority — {data['cve_id']}")
+    print("=" * 60)
+    print(f"  Score:  {data['score']}/100  ({data['label']})")
+    print()
+    print("Signal Breakdown:")
+    print("-" * 60)
+
+    signals = data.get("signals", {})
+
+    # CVSS
+    cvss = signals.get("cvss", {})
+    raw_cvss = cvss.get("raw_score")
+    cvss_str = f"{raw_cvss}/10" if raw_cvss is not None else "N/A"
+    print(f"  CVSS Base Score:      {cvss_str:>10}  (weight {cvss.get('weight', 0):.0%})")
+
+    # EPSS current
+    epss = signals.get("epss_current", {})
+    raw_epss = epss.get("raw_epss")
+    epss_str = f"{raw_epss:.4f}" if raw_epss is not None else "N/A"
+    print(f"  EPSS Current:         {epss_str:>10}  (weight {epss.get('weight', 0):.0%})")
+
+    # EPSS spike
+    spike = signals.get("epss_spike", {})
+    if spike.get("spike_detected"):
+        spike_str = f"+{spike.get('max_jump', 0):.4f} ({spike.get('days_ago', '?')}d ago)"
+    else:
+        spike_str = "none detected"
+    print(f"  EPSS Spike:           {spike_str:>10}  (weight {spike.get('weight', 0):.0%})")
+
+    # KEV
+    kev = signals.get("cisa_kev", {})
+    kev_str = "YES ⚠" if kev.get("in_kev") else "no"
+    print(f"  CISA KEV:             {kev_str:>10}  (weight {kev.get('weight', 0):.0%})")
+
+    # Patch
+    patch = signals.get("patch_availability", {})
+    patch_str = "available" if patch.get("has_patch") else "NOT FOUND"
+    print(f"  Patch:                {patch_str:>10}  (weight {patch.get('weight', 0):.0%})")
+
+    # Age
+    age = signals.get("age", {})
+    age_days = age.get("age_days")
+    age_str = f"{age_days}d" if age_days is not None else "N/A"
+    print(f"  CVE Age:              {age_str:>10}  (weight {age.get('weight', 0):.0%})")
+
+    print()
+    print(f"Interpretation: {data.get('interpretation', '')}")
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2371,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "temporal-priority":
+        idx = argv.index("temporal-priority")
+        sys.exit(_run_temporal_priority(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
