@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cve-timeline",
 }
 
 
@@ -1935,6 +1936,60 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cve-timeline subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cve_timeline_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cve-timeline",
+        description=(
+            "Reconstruct the full event timeline for a CVE: NVD publication, "
+            "CVSS scoring, EPSS history and spikes, CISA KEV addition, and "
+            "patch/commit dates from NVD references and GitHub advisories."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cve_timeline(argv: list[str]) -> int:
+
+    parser = _build_cve_timeline_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.get_cve_timeline import (
+            build_timeline,
+            format_timeline_json,
+            format_timeline_text,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = build_timeline(args.cve_id)
+
+    if "error" in result and not result.get("events"):
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(format_timeline_json(result))
+    else:
+        print(format_timeline_text(result))
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2323,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cve-timeline":
+        idx = argv.index("cve-timeline")
+        sys.exit(_run_cve_timeline(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
