@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "temporal-priority",
 }
 
 
@@ -1935,6 +1936,69 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# temporal-priority subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_temporal_priority_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent temporal-priority",
+        description=(
+            "Compute a 0–100 temporal priority (urgency) score for a CVE combining\n"
+            "CVSS base score, current EPSS, EPSS spike recency, CISA KEV membership,\n"
+            "patch availability, and CVE age."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_temporal_priority(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_temporal_priority_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_temporal_priority import (
+            compute_temporal_priority,
+            render_text,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    import re as _re
+
+    if not _re.match(r"^CVE-\d{4}-\d{4,}$", cve_id, _re.IGNORECASE):
+        print(f"[error] Invalid CVE format: '{cve_id}'. Expected: CVE-YYYY-NNNNN", file=sys.stderr)
+        return 1
+
+    try:
+        result = compute_temporal_priority(cve_id)
+    except Exception as exc:
+        print(f"[error] Failed to compute temporal priority: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    print(render_text(result))
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2332,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "temporal-priority":
+        idx = argv.index("temporal-priority")
+        sys.exit(_run_temporal_priority(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
