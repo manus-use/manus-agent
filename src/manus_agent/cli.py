@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cluster-variants",
 }
 
 
@@ -1935,6 +1936,84 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# cluster-variants subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cluster_variants_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cluster-variants",
+        description=(
+            "Group CVEs related to an input CVE across three cluster dimensions:\n"
+            "same component/vendor, same CWE weakness class, and same researcher/\n"
+            "disclosure domain. Useful for finding the full attack surface when\n"
+            "one CVE is confirmed exploited."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="The CVE identifier to cluster around (e.g., CVE-2021-44228)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cluster_variants(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_cluster_variants_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.cluster_variants import (
+            _build_clusters,
+            _format_text,
+            _nvd_get,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    import re as _re
+
+    cve_id = args.cve_id.strip().upper()
+    if not _re.match(r"^CVE-\d{4}-\d{4,}$", cve_id):
+        print("Error: Invalid CVE ID format. Must be like 'CVE-2021-44228'.", file=sys.stderr)
+        return 1
+
+    nvd_base = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+    try:
+        resp = _nvd_get(nvd_base, params={"cveId": cve_id})
+        data = resp.json()
+    except Exception as exc:
+        print(f"Error fetching CVE data from NVD: {exc}", file=sys.stderr)
+        return 1
+
+    vulns = data.get("vulnerabilities", [])
+    if not vulns:
+        print(f"No vulnerability data found for {cve_id}.", file=sys.stderr)
+        return 1
+
+    cve_data = vulns[0].get("cve", {})
+    clusters = _build_clusters(cve_id, cve_data)
+
+    if args.output == "json":
+        print(_json.dumps(clusters, indent=2))
+    else:
+        print(_format_text(clusters))
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2347,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cluster-variants":
+        idx = argv.index("cluster-variants")
+        sys.exit(_run_cluster_variants(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
