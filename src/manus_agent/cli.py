@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "attack-map",
 }
 
 
@@ -1935,6 +1936,63 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# attack-map subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_attack_map_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent attack-map",
+        description=(
+            "Map a CVE to MITRE ATT&CK techniques and tactics by resolving the "
+            "CVE → CWE → CAPEC → ATT&CK chain. Shows which attack techniques "
+            "could exploit this vulnerability and where they sit in the kill chain."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_attack_map(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_attack_map_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    from .tools.get_attack_map import fetch_attack_map
+
+    try:
+        with console.status(f"Mapping {cve_id} to ATT&CK…", spinner="dots"):
+            result = fetch_attack_map(cve_id, output_format=args.output)
+    except Exception as exc:
+        console.print(f"[red]✗ ATT&CK mapping failed: {exc}[/red]")
+        return 1
+
+    if args.output == "json":
+        console.print_json(_json.dumps(result, indent=2))
+    else:
+        console.print(
+            Panel(
+                str(result),
+                title=f"[bold green]{cve_id} ATT&CK Map[/bold green]",
+                border_style="green",
+            )
+        )
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2326,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "attack-map":
+        idx = argv.index("attack-map")
+        sys.exit(_run_attack_map(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
