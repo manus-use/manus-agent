@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "exposure-window",
 }
 
 
@@ -1935,6 +1936,67 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# exposure-window subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_exposure_window_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent exposure-window",
+        description=(
+            "Compute the vulnerability exposure window for a CVE — the elapsed time\n"
+            "between CVE disclosure and patch availability. Returns disclosure date,\n"
+            "patch date, exposure duration, CISA KEV timing, EPSS score, and a risk label."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="CVE identifier (e.g. CVE-2021-44228)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_exposure_window(argv: list[str]) -> int:
+
+    parser = _build_exposure_window_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.get_exposure_window import (
+            _format_json,
+            _format_text,
+            compute_exposure_window,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    cve_id = args.cve_id.strip()
+
+    print(f"Computing exposure window for {cve_id}...")
+    result = compute_exposure_window(cve_id)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_format_json(result))
+    else:
+        print(_format_text(result))
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2330,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "exposure-window":
+        idx = argv.index("exposure-window")
+        sys.exit(_run_exposure_window(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
