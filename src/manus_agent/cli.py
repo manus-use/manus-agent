@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "triage",
 }
 
 
@@ -1935,6 +1936,84 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# triage subcommand
+# ---------------------------------------------------------------------------
+
+
+def _run_triage(argv: list[str]) -> int:
+    """Run the triage subcommand: batch CVE prioritization."""
+    parser = argparse.ArgumentParser(
+        prog="manus-agent triage",
+        description=(
+            "Batch CVE triage: fetches NVD CVSS + EPSS + CISA KEV for multiple CVEs "
+            "and produces a prioritized ranking by composite score."
+        ),
+    )
+    parser.add_argument(
+        "cve_ids",
+        nargs="*",
+        help=("CVE IDs to triage (e.g., CVE-2024-3094 CVE-2021-44228). Also reads from stdin if piped."),
+    )
+    parser.add_argument(
+        "--file",
+        "-f",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="Read CVE IDs from a file (one per line)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+
+    args = parser.parse_args(argv)
+
+    # Collect CVE IDs from all sources
+    cve_ids: list[str] = list(args.cve_ids) if args.cve_ids else []
+
+    # Read from file if specified
+    if args.file:
+        try:
+            with args.file.open(encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        cve_ids.append(line)
+        except OSError as exc:
+            print(f"[error] Cannot read file: {exc}", file=sys.stderr)
+            return 1
+
+    # Read from stdin if no positional args and no file
+    if not cve_ids and not sys.stdin.isatty():
+        for line in sys.stdin:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                cve_ids.append(line)
+
+    if not cve_ids:
+        parser.error("No CVE IDs provided. Pass them as arguments, via --file, or pipe to stdin.")
+
+    from manus_agent.tools.triage_cves import triage_cves
+
+    print(f"Triaging {len(cve_ids)} CVE(s)...", file=sys.stderr)
+    result = triage_cves(cve_ids, output_format=args.output)
+
+    if "error" in result and not result.get("results"):
+        print(f"[error] {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        sys.stdout.write(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+    else:
+        sys.stdout.write(result.get("formatted", ""))
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2347,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "triage":
+        idx = argv.index("triage")
+        sys.exit(_run_triage(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
