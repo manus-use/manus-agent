@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cve-timeline",
 }
 
 
@@ -2050,6 +2051,82 @@ def _build_run_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ---------------------------------------------------------------------------
+# cve-timeline subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cve_timeline_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cve-timeline",
+        description=(
+            "Reconstruct the full event timeline for a CVE: NVD publish date \u2192 \n"
+            "EPSS history \u2192 CISA KEV add date \u2192 GitHub advisory dates.\n"
+            "Useful for understanding how quickly a vulnerability was weaponised and fixed."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cve_timeline(argv: list[str]) -> int:
+    parser = _build_cve_timeline_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_cve_timeline import build_timeline
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        result = build_timeline(cve_id)
+    except Exception as exc:
+        print(f"[error] Timeline assembly failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not result["events"]:
+        print(f"[warning] No timeline events found for {cve_id.upper()}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(result, indent=2))
+        return 0
+
+    # Text output
+    print(f"CVE Timeline: {result['cve_id']}")
+    print(f"Sources queried: {', '.join(result['sources_queried'])}")
+    print(f"Sources with data: {', '.join(result['sources_with_data'])}")
+    if result["span_days"] is not None:
+        print(f"Timeline span: {result['span_days']} days")
+    print()
+    print(f"{'Date':<12} {'Source':<18} {'Event':<28} Detail")
+    print(f"{'─' * 12} {'─' * 18} {'─' * 28} {'─' * 50}")
+    for ev in result["events"]:
+        date_str = ev.get("date", "unknown")
+        source = ev.get("source", "")
+        event_name = ev.get("event", "")
+        detail = ev.get("detail", "")
+        # Truncate detail for text display
+        if len(detail) > 80:
+            detail = detail[:77] + "..."
+        print(f"{date_str:<12} {source:<18} {event_name:<28} {detail}")
+
+    return 0
+
+
 def _build_init_parser() -> argparse.ArgumentParser:
     """Build the `init` subcommand parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2345,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cve-timeline":
+        idx = argv.index("cve-timeline")
+        sys.exit(_run_cve_timeline(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
