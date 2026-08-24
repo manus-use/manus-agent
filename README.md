@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [advisory-aliases](#manus-agent-advisory-aliases-cve-id--advisory-alias-resolver)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -341,6 +342,30 @@ Blast-radius labels per package:
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent advisory-aliases <CVE-ID>` — Advisory alias resolver
+
+```bash
+manus-agent advisory-aliases CVE-2021-44228
+manus-agent advisory-aliases CVE-2024-3094 --output json
+manus-agent advisory-aliases CVE-2023-44487 --no-urls
+```
+
+Resolves all cross-referenced advisory identifiers for a CVE across vulnerability databases. Maps a CVE to its aliases in GHSA (GitHub), RHSA/RHBA (Red Hat), DSA (Debian), USN (Ubuntu), ALAS (Amazon Linux), PYSEC (Python), RUSTSEC (Rust), GO (Go), HSEC (Haskell), and more.
+
+| Source | Coverage |
+|--------|----------|
+| OSV.dev | Primary alias graph — GHSA, PYSEC, RUSTSEC, GO, DLA, MAL, HSEC |
+| NVD | Reference URL parsing — GHSA, RHSA, DSA, USN, SUSE |
+| VulnCheck | Optional (API key) — additional cross-references |
+
+Use cases:
+- Find the GHSA for a CVE to get patch commit links
+- Discover distro-specific advisories (DSA, USN, RHSA) for OS-level patching
+- Identify ecosystem IDs (PYSEC, RUSTSEC, GO) for dependency scanning tools
+- Assess multi-database coverage for a vulnerability
 
 ---
 
