@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "dep-audit",
 }
 
 
@@ -1935,6 +1936,117 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# dep-audit subcommand
+# ---------------------------------------------------------------------------
+
+
+def _run_dep_audit(argv: list[str]) -> int:
+    import json as _json
+
+    parser = argparse.ArgumentParser(
+        prog="manus-agent dep-audit",
+        description=(
+            "Audit project dependencies for known vulnerabilities.\n"
+            "Parses manifest files (requirements.txt, package.json, go.mod,\n"
+            "Cargo.lock, Gemfile.lock, pom.xml, composer.json) and queries\n"
+            "OSV.dev for known CVEs. Enriches with EPSS and CISA KEV status."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="Project directory containing manifest files (default: current dir)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
+        "--skip-epss",
+        action="store_true",
+        help="Skip EPSS score enrichment for faster results",
+    )
+    parser.add_argument(
+        "--skip-kev",
+        action="store_true",
+        help="Skip CISA KEV lookup for faster results",
+    )
+
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.dep_audit import audit_dependencies
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    directory = args.directory
+    if not os.path.isdir(directory):
+        print(f"[error] Directory not found: {directory!r}", file=sys.stderr)
+        return 1
+
+    result = audit_dependencies(
+        directory,
+        skip_epss=args.skip_epss,
+        skip_kev=args.skip_kev,
+    )
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # Text output
+    if result["status"] == "no_manifests":
+        print(f"No supported manifest files found in {directory}")
+        print(f"Supported: {', '.join(result.get('supported_files', []))}")
+        return 1
+
+    summary = result["summary"]
+    findings = result["findings"]
+
+    print(f"\n{'='*60}")
+    print(f"  Dependency Audit Report")
+    print(f"{'='*60}")
+    print(f"  Directory:      {result['directory']}")
+    print(f"  Manifests:      {', '.join(result['manifests_parsed'])}")
+    print(f"  Packages:       {summary['total_packages']}")
+    print(f"  Vulnerabilities:{summary['unique_vulnerabilities']}")
+    print(f"  Affected pkgs:  {summary['packages_with_vulns']}")
+    print(f"  In CISA KEV:    {summary['kev_findings']}")
+    print(f"  High EPSS (≥50%): {summary['high_epss_findings']}")
+    print(f"  Scan time:      {result['elapsed_seconds']}s")
+    print(f"{'='*60}\n")
+
+    if not findings:
+        print("  ✅ No known vulnerabilities found!\n")
+        return 0
+
+    for i, f in enumerate(findings, 1):
+        kev_marker = " 🔴 KEV" if f["in_kev"] else ""
+        epss_str = f"EPSS={f['epss_score']:.1%}" if f["epss_score"] else ""
+        fixed_str = f" → fix: {f['fixed_version']}" if f["fixed_version"] else ""
+
+        print(f"  [{i}] {f['vuln_id']}{kev_marker}")
+        print(f"      Package: {f['package']}=={f['version']} ({f['ecosystem']})")
+        print(f"      Source:  {f['source_file']}")
+        if f["aliases"]:
+            print(f"      CVEs:    {', '.join(f['aliases'])}")
+        if epss_str:
+            print(f"      {epss_str}")
+        if f["summary"]:
+            print(f"      {f['summary']}")
+        if fixed_str:
+            print(f"      {fixed_str}")
+        print()
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2380,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "dep-audit":
+        idx = argv.index("dep-audit")
+        sys.exit(_run_dep_audit(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")

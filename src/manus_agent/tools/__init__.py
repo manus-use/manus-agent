@@ -16,6 +16,7 @@ from strands_tools import (
 
 from manus_agent.tools.http_request import http_request
 from manus_agent.tools.python_repl import python_repl
+from manus_agent.tools.dep_audit import dep_audit
 
 # Collect all tools
 ALL_TOOLS = {
@@ -30,6 +31,7 @@ ALL_TOOLS = {
     "generate_image": generate_image,
     "current_time": current_time,
     "calculator": calculator,
+    "dep_audit": dep_audit,
 }
 
 
