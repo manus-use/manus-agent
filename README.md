@@ -34,6 +34,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [sbom-scan](#manus-agent-sbom-scan-bomfile--sbom-scanner)
   - [temporal-priority](#manus-agent-temporal-priority-cve-id--temporal-priority-scorer)
   - [cluster-variants](#manus-agent-cluster-variants-cve-id--cve-variant-clustering)
+  - [dep-audit](#manus-agent-dep-audit-directory--dependency-vulnerability-audit)
   - [changelog](#manus-agent-changelog--manage-project-changelog)
 - [Configuration](#configuration)
 - [Python API](#python-api)
@@ -341,6 +342,54 @@ Blast-radius labels per package:
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent dep-audit [DIRECTORY]` — Dependency vulnerability audit
+
+```bash
+# Audit current directory
+manus-agent dep-audit
+
+# Audit a specific project
+manus-agent dep-audit /path/to/project
+
+# JSON output for CI pipelines
+manus-agent dep-audit . --output json
+
+# Fast mode (skip EPSS + KEV enrichment)
+manus-agent dep-audit . --skip-epss --skip-kev
+```
+
+Scans a project's dependency manifest files and queries OSV.dev in batch for known vulnerabilities. Unlike `sbom-scan` (which requires a pre-generated CycloneDX/SPDX file), `dep-audit` works directly from raw manifest files — no SBOM generation step needed.
+
+**Supported manifest files:**
+
+| File | Ecosystem |
+|------|-----------|
+| `requirements.txt` | PyPI |
+| `package.json` / `package-lock.json` | npm |
+| `go.mod` | Go |
+| `Cargo.toml` / `Cargo.lock` | crates.io |
+| `Gemfile.lock` | RubyGems |
+| `pom.xml` | Maven |
+| `composer.json` | Packagist |
+
+**Enrichment sources:**
+
+| Source | Data |
+|--------|------|
+| OSV.dev | Vulnerability IDs, affected ranges, fixed versions |
+| FIRST EPSS | Exploitation probability scores |
+| CISA KEV | Known exploited vulnerabilities catalog |
+
+Findings are sorted by severity: CISA KEV entries first, then by EPSS score descending.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output {text,json}` | `text` | Output format |
+| `--skip-epss` | off | Skip EPSS enrichment (faster) |
+| `--skip-kev` | off | Skip CISA KEV lookup (faster) |
 
 ---
 
