@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "advisory-aliases",
 }
 
 
@@ -1935,6 +1936,102 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# advisory-aliases subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_advisory_aliases_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent advisory-aliases",
+        description=(
+            "Resolve all cross-referenced advisory identifiers for a CVE.\n"
+            "Maps a CVE to its aliases across vulnerability databases: GHSA,\n"
+            "RHSA, DSA, USN, ALAS, PYSEC, RUSTSEC, GO, and more.\n"
+            "Uses OSV.dev alias graph + NVD references + optional VulnCheck."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--no-urls",
+        action="store_true",
+        default=False,
+        help="Omit advisory URLs from output",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_advisory_aliases(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_advisory_aliases_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.resolve_advisory_aliases import fetch_advisory_aliases
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    include_urls = not args.no_urls
+    result = fetch_advisory_aliases(cve_id, include_urls=include_urls)
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # --- text output ---
+    print()
+    print(f"Advisory Aliases for {cve_id}")
+    print("=" * 60)
+    print(f"Total aliases found: {result['total_aliases']}")
+    print(f"Databases covered:   {result['databases_found']}")
+    print(f"Sources queried:     {', '.join(result['sources_queried'])}")
+    print()
+
+    by_db = result.get("aliases_by_database", {})
+    if not by_db:
+        print("No advisory aliases found for this CVE.")
+    else:
+        for db_name, entries in sorted(by_db.items()):
+            print(f"  {db_name}:")
+            for entry in entries:
+                line = f"    {entry['id']}"
+                if include_urls and entry.get("url"):
+                    line += f"  ->  {entry['url']}"
+                print(line)
+            print()
+
+    affected = result.get("affected_packages", [])
+    if affected:
+        print("Affected packages:")
+        for pkg in affected[:10]:
+            eco = pkg.get("ecosystem", "")
+            name = pkg.get("name", "")
+            print(f"    {eco}:{name}" if eco else f"    {name}")
+        if len(affected) > 10:
+            print(f"    ... and {len(affected) - 10} more")
+        print()
+
+    if result.get("errors"):
+        print("Warnings:")
+        for err in result["errors"]:
+            print(f"    {err}")
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2365,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "advisory-aliases":
+        idx = argv.index("advisory-aliases")
+        sys.exit(_run_advisory_aliases(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
