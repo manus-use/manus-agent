@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "generate-sbom",
 }
 
 
@@ -1935,6 +1936,140 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# generate-sbom subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_generate_sbom_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the ``generate-sbom`` subcommand."""
+    p = argparse.ArgumentParser(
+        prog="manus-agent generate-sbom",
+        description=(
+            "Generate a CycloneDX 1.5 SBOM (Software Bill of Materials) from a\n"
+            "project lockfile. Parses dependency lockfiles and produces structured\n"
+            "JSON suitable for vulnerability scanning with sbom-scan, Grype, or Trivy.\n\n"
+            "Supported formats: package-lock.json, yarn.lock, pnpm-lock.yaml,\n"
+            "poetry.lock, requirements.txt (pinned), go.sum, Cargo.lock, Gemfile.lock."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=True,
+    )
+    p.add_argument(
+        "lockfile",
+        metavar="LOCKFILE",
+        help="Path to the lockfile to convert (format auto-detected from filename)",
+    )
+    p.add_argument(
+        "--type",
+        dest="lockfile_type",
+        choices=["npm", "yarn", "pnpm", "poetry", "requirements", "gosum", "cargo", "gemfile"],
+        default=None,
+        help="Override auto-detected lockfile type",
+    )
+    p.add_argument(
+        "--project-name",
+        default=None,
+        help="Project name for SBOM metadata (default: parent directory name)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["json", "text"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    p.add_argument(
+        "--out-file",
+        default=None,
+        metavar="PATH",
+        help="Write SBOM JSON to file instead of stdout",
+    )
+    return p
+
+
+def _run_generate_sbom(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_generate_sbom_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.generate_sbom import (
+            _TYPE_TO_PARSER,
+            _build_cyclonedx,
+            detect_lockfile_type,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    from pathlib import Path as _Path
+
+    lockfile_path = _Path(args.lockfile).expanduser().resolve()
+    if not lockfile_path.exists():
+        print(f"Error: file not found: {args.lockfile}", file=sys.stderr)
+        return 1
+
+    try:
+        content = lockfile_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"Error: cannot read file: {exc}", file=sys.stderr)
+        return 1
+
+    # Detect type
+    lockfile_type = args.lockfile_type or detect_lockfile_type(lockfile_path.name)
+    if not lockfile_type:
+        print(
+            f"Error: cannot detect lockfile type for '{lockfile_path.name}'. "
+            f"Use --type to specify. Supported: {', '.join(sorted(_TYPE_TO_PARSER.keys()))}",
+            file=sys.stderr,
+        )
+        return 1
+
+    parser_fn = _TYPE_TO_PARSER.get(lockfile_type)
+    if not parser_fn:
+        print(f"Error: unsupported type '{lockfile_type}'", file=sys.stderr)
+        return 1
+
+    # Parse
+    components = parser_fn(content)
+
+    # Project name
+    project_name = args.project_name or lockfile_path.parent.name
+
+    # Build SBOM
+    sbom = _build_cyclonedx(components, project_name=project_name, lockfile_path=str(lockfile_path))
+
+    if args.output == "json":
+        output_str = _json.dumps(sbom, indent=2)
+    else:
+        # Text summary
+        lines = [
+            f"CycloneDX {sbom['specVersion']} SBOM — {project_name}",
+            "=" * 60,
+            f"Components: {len(sbom['components'])}",
+            f"Lockfile:   {args.lockfile}",
+            f"Type:       {lockfile_type}",
+            "",
+        ]
+        for comp in sbom["components"]:
+            lines.append(f"  {comp['name']}@{comp['version']}  ({comp['purl']})")
+        output_str = "\n".join(lines)
+
+    if args.out_file:
+        out_path = _Path(args.out_file).expanduser().resolve()
+        try:
+            out_path.write_text(output_str + "\n", encoding="utf-8")
+            print(f"SBOM written to {out_path} ({len(sbom['components'])} components)")
+        except OSError as exc:
+            print(f"Error: cannot write output: {exc}", file=sys.stderr)
+            return 1
+    else:
+        print(output_str)
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2403,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "generate-sbom":
+        idx = argv.index("generate-sbom")
+        sys.exit(_run_generate_sbom(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
