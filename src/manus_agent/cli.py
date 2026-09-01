@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "cpe-search",
 }
 
 
@@ -2071,6 +2072,184 @@ def _build_init_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# ---------------------------------------------------------------------------
+# cpe-search subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_cpe_search_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent cpe-search",
+        description=(
+            "Search NVD for CPE (Common Platform Enumeration) matches by product\n"
+            "keyword, then optionally retrieve all CVEs affecting those CPEs.\n"
+            "Answers: 'what CVEs affect <product> <version>?'"
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  manus-agent cpe-search 'apache log4j'\n"
+            "  manus-agent cpe-search 'openssl' --version 3.0.7\n"
+            "  manus-agent cpe-search 'linux kernel' --type o\n"
+            "  manus-agent cpe-search 'apache log4j' --version 2.14.1 --output json\n"
+            "  manus-agent cpe-search 'microsoft exchange' --no-cves\n"
+        ),
+    )
+    p.add_argument(
+        "keyword",
+        metavar="KEYWORD",
+        help="Product search keyword(s), e.g. 'apache log4j', 'openssl'",
+    )
+    p.add_argument(
+        "--version",
+        default="",
+        metavar="VER",
+        help="Filter CPE matches to those containing this version string",
+    )
+    p.add_argument(
+        "--type",
+        choices=["a", "o", "h"],
+        default="a",
+        dest="cpe_type",
+        help="CPE part: a=application (default), o=OS, h=hardware",
+    )
+    p.add_argument(
+        "--max-cpes",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Max CPE matches to return (1-50, default: 10)",
+    )
+    p.add_argument(
+        "--max-cves",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Max CVEs per CPE (1-100, default: 20)",
+    )
+    p.add_argument(
+        "--no-cves",
+        action="store_true",
+        help="CPE-only search; skip CVE lookup",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_cpe_search(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+
+    parser = _build_cpe_search_parser()
+    args = parser.parse_args(argv)
+    keyword: str = args.keyword.strip()
+
+    if not keyword:
+        parser.error("KEYWORD is required")
+
+    try:
+        from manus_agent.tools.search_cpe import search_cpe_and_cves
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = search_cpe_and_cves(
+        keyword,
+        version=args.version,
+        cpe_type=args.cpe_type,
+        fetch_cves=not args.no_cves,
+        max_cpes=args.max_cpes,
+        max_cves_per_cpe=args.max_cves,
+    )
+
+    if result.get("error"):
+        print(f"[error] {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2, default=str))
+        return 0
+
+    # ---- text output ----
+    summary = result.get("summary", {})
+    cpe_results = result.get("cpe_results", {})
+    cpes = cpe_results.get("cpes", [])
+    unique_cves = result.get("unique_cves", [])
+
+    print()
+    print(f"CPE Search: {keyword!r}")
+    if args.version:
+        print(f"  Version filter : {args.version}")
+    print(f"  CPE type       : {args.cpe_type} ({'application' if args.cpe_type == 'a' else 'OS' if args.cpe_type == 'o' else 'hardware'})")
+    print(f"  CPEs found     : {summary.get('cpes_found', 0)} (of {cpe_results.get('total_results', 0)} total NVD matches)")
+    print()
+
+    if not cpes:
+        print("No CPE matches found.")
+        return 0
+
+    # CPE table
+    print("Matched CPEs:")
+    print(f"  {'#':<4} {'Vendor':<20} {'Product':<20} {'Version':<15} {'Deprecated':<12} CPE URI")
+    print("  " + "-" * 100)
+    for i, cpe in enumerate(cpes, 1):
+        dep = "YES" if cpe.get("deprecated") else ""
+        print(
+            f"  {i:<4} {cpe.get('vendor', '')[:20]:<20} "
+            f"{cpe.get('product', '')[:20]:<20} "
+            f"{cpe.get('version', '')[:15]:<15} "
+            f"{dep:<12} "
+            f"{cpe.get('cpe_uri', '')}"
+        )
+    print()
+
+    if args.no_cves:
+        return 0
+
+    # CVE summary
+    total_cves = summary.get("total_unique_cves", 0)
+    if total_cves == 0:
+        print("No CVEs found for the matched CPEs.")
+        return 0
+
+    crit = summary.get("critical_count", 0)
+    high = summary.get("high_count", 0)
+    med = summary.get("medium_count", 0)
+    low = summary.get("low_count", 0)
+
+    print(f"CVE Summary: {total_cves} unique CVEs")
+    if crit:
+        print(f"  🔴 CRITICAL : {crit}")
+    if high:
+        print(f"  🟠 HIGH     : {high}")
+    if med:
+        print(f"  🟡 MEDIUM   : {med}")
+    if low:
+        print(f"  🟢 LOW      : {low}")
+    print()
+
+    # CVE table (top 30)
+    display_cves = unique_cves[:30]
+    print(f"  {'CVE ID':<20} {'CVSS':<6} {'Severity':<10} {'Published':<12} Description")
+    print("  " + "-" * 100)
+    for cve in display_cves:
+        score = cve.get("cvss_score", 0.0)
+        severity = cve.get("cvss_severity", "")[:10]
+        published = (cve.get("published") or "")[:10]
+        desc = (cve.get("description") or "")[:60]
+        print(f"  {cve.get('cve_id', ''):<20} {score:<6.1f} {severity:<10} {published:<12} {desc}")
+
+    if len(unique_cves) > 30:
+        print(f"  ... and {len(unique_cves) - 30} more (use --output json for full list)")
+
+    return 0
+
+
 def _build_doctor_parser() -> argparse.ArgumentParser:
     """Build the `doctor` subcommand parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2447,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "cpe-search":
+        idx = argv.index("cpe-search")
+        sys.exit(_run_cpe_search(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
