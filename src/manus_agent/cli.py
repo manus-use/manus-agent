@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-freshness",
     "changelog",
     "blast-radius",
 }
@@ -1524,6 +1525,173 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         date = (r.get("published") or "")[:col_date]
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# poc-freshness subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_freshness_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-freshness",
+        description=(
+            "Measure how recently proof-of-concept exploit activity occurred\n"
+            "for a CVE. Checks commit recency in known PoC repos, recently-\n"
+            "starred GitHub repositories, and new Exploit-DB entries.\n\n"
+            "Returns a 0\u2013100 freshness score: higher means more recent\n"
+            "attacker interest. Tier labels: ACTIVE (80\u2013100), RECENT (60\u201379),\n"
+            "AGING (40\u201359), STALE (20\u201339), DORMANT (0\u201319)."
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  manus-agent poc-freshness CVE-2024-3094\n"
+            "  manus-agent poc-freshness CVE-2024-3094 --output json | jq .freshness_score\n"
+        ),
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_poc_freshness(argv: list[str]) -> int:
+    import json as _json
+    import re as _re
+
+    parser = _build_poc_freshness_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.get_poc_freshness import compute_freshness
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn(f"[bold blue]Checking PoC freshness for {cve_id.upper()}..."),
+        console=console,
+        transient=True,
+    ):
+        result = compute_freshness(cve_id)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # ---- text output ----
+    score = result.get("freshness_score", 0)
+    tier = result.get("tier", "DORMANT")
+    summary = result.get("summary", "")
+    signals = result.get("signals", {})
+
+    # Tier colour
+    tier_colours = {
+        "ACTIVE": "bright_red",
+        "RECENT": "yellow",
+        "AGING": "cyan",
+        "STALE": "dim",
+        "DORMANT": "dim",
+    }
+    tier_colour = tier_colours.get(tier, "white")
+
+    print()
+    console.print(
+        Panel(
+            f"[bold]{cve_id.upper()}[/bold]\n\n"
+            f"  Freshness Score : [{tier_colour}]{score}/100[/{tier_colour}]\n"
+            f"  Tier            : [{tier_colour}]{tier}[/{tier_colour}]\n\n"
+            f"  {summary}",
+            title="PoC Freshness",
+            border_style=tier_colour,
+        )
+    )
+
+    # Signal breakdown
+    table = Table(title="Signal Breakdown", show_header=True, header_style="bold magenta")
+    table.add_column("Signal", style="cyan", width=20)
+    table.add_column("Weight", style="yellow", width=8)
+    table.add_column("Sub-score", style="white", width=10)
+    table.add_column("Details", style="white")
+
+    # Commit recency
+    cr = signals.get("commit_recency", {})
+    cr_details = f"{cr.get('repos_found', 0)} repo(s) found"
+    if cr.get("days_since_last_activity") is not None:
+        cr_details += f", last activity {cr['days_since_last_activity']:.0f}d ago"
+    table.add_row(
+        "Commit Recency",
+        f"{cr.get('weight', 0):.0%}",
+        f"{cr.get('subscore', 0):.0f}/100",
+        cr_details,
+    )
+
+    # Star velocity
+    sv = signals.get("star_velocity", {})
+    sv_details = f"{sv.get('total_repos', 0)} repo(s), {sv.get('total_stars', 0)} total stars"
+    if sv.get("recent_repos", 0) > 0:
+        sv_details += f", {sv['recent_repos']} updated <90d"
+    table.add_row(
+        "Star Velocity",
+        f"{sv.get('weight', 0):.0%}",
+        f"{sv.get('subscore', 0):.0f}/100",
+        sv_details,
+    )
+
+    # Exploit-DB
+    edb = signals.get("exploitdb_recency", {})
+    edb_details = f"{edb.get('total_entries', 0)} entry(ies)"
+    if edb.get("days_since_most_recent") is not None:
+        edb_details += f", newest {edb['days_since_most_recent']:.0f}d ago"
+    table.add_row(
+        "Exploit-DB",
+        f"{edb.get('weight', 0):.0%}",
+        f"{edb.get('subscore', 0):.0f}/100",
+        edb_details,
+    )
+
+    console.print(table)
+
+    # PoC repos detail (if any)
+    repos = cr.get("repos", [])
+    if repos:
+        print()
+        repo_table = Table(title="PoC Repositories", show_header=True, header_style="bold")
+        repo_table.add_column("Repository", style="cyan")
+        repo_table.add_column("Stars", style="yellow", width=8)
+        repo_table.add_column("Last Activity", style="white", width=14)
+        repo_table.add_column("Days Ago", style="white", width=10)
+
+        for r in repos[:10]:
+            days_ago = r.get("days_since_activity")
+            days_str = f"{days_ago:.0f}d" if days_ago is not None else "\u2014"
+            last_dt = r.get("last_commit_at") or r.get("pushed_at") or "\u2014"
+            if len(last_dt) > 10:
+                last_dt = last_dt[:10]
+            repo_table.add_row(
+                r.get("repo_url", ""),
+                str(r.get("stargazers_count", 0)),
+                last_dt,
+                days_str,
+            )
+        console.print(repo_table)
 
     return 0
 
@@ -2260,6 +2428,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-freshness":
+        idx = argv.index("poc-freshness")
+        sys.exit(_run_poc_freshness(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
