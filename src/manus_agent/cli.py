@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "version-range",
 }
 
 
@@ -1935,6 +1936,162 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# version-range subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_version_range_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent version-range",
+        description=(
+            "Resolve a CVE to its affected version ranges.\n"
+            "Walks NVD CPE configurations and cross-references OSV.dev\n"
+            "ecosystem-specific package + version-range data to produce\n"
+            "structured vulnerable ranges, affected releases, and the\n"
+            "first patched release per package."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--ecosystem",
+        choices=["auto", "pypi", "npm", "maven", "go", "crates.io", "rubygems", "packagist", "nuget", "hex", "pub"],
+        default="auto",
+        help="Force a specific ecosystem (default: auto — all ecosystems)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_version_range(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_version_range_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_version_range import fetch_version_range
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    ecosystem = args.ecosystem if args.ecosystem != "auto" else ""
+    payload = fetch_version_range(cve_id, ecosystem)
+
+    if args.output == "json":
+        print(_json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    if not payload.get("found"):
+        print(payload.get("message", "No data found."))
+        return 1
+
+    print()
+    print(f"Version Range Analysis — {payload['cve_id']}")
+    print("=" * 60)
+
+    if payload.get("description"):
+        desc = payload["description"]
+        if len(desc) > 200:
+            desc = desc[:200] + "..."
+        print(f"Description: {desc}")
+        print()
+
+    cvss = payload.get("cvss", {})
+    if cvss.get("baseScore") is not None:
+        sev = cvss.get("baseSeverity", "")
+        score = cvss["baseScore"]
+        vec = cvss.get("vectorString", "")
+        print(f"CVSS: {score} {sev}  {vec}")
+
+    if payload.get("published"):
+        print(f"Published: {payload['published']}")
+    if payload.get("modified"):
+        print(f"Modified:  {payload['modified']}")
+
+    if payload.get("aliases"):
+        print(f"Aliases: {', '.join(payload['aliases'][:10])}")
+
+    eco_filter = payload.get("ecosystem_filter", "")
+    if eco_filter:
+        print(f"Ecosystem filter: {eco_filter}")
+
+    # OSV packages
+    osv_pkgs = payload.get("osv_packages", [])
+    if osv_pkgs:
+        print()
+        print(f"OSV.dev Affected Packages ({len(osv_pkgs)})")
+        print("-" * 40)
+        for pkg in osv_pkgs:
+            eco = pkg.get("ecosystem", "Unknown")
+            name = pkg.get("package", "unknown")
+            print(f"  {eco}:{name}")
+            for rs in pkg.get("range_strings", []):
+                print(f"    Vulnerable: {rs}")
+            fpv = pkg.get("first_patched_version")
+            if fpv:
+                print(f"    First fix:  {fpv}")
+            elif pkg.get("last_affected"):
+                la = ", ".join(pkg["last_affected"])
+                print(f"    Last affected: {la} (no fix listed)")
+            if pkg.get("affected_versions_sample"):
+                sample = ", ".join(pkg["affected_versions_sample"][:8])
+                count = pkg.get("affected_version_count", 0)
+                if count > 8:
+                    sample += f" ... ({count} total)"
+                print(f"    Versions:   {sample}")
+
+    # NVD ranges
+    nvd_ranges = payload.get("nvd_ranges", [])
+    if nvd_ranges:
+        print()
+        print(f"NVD CPE Ranges ({len(nvd_ranges)})")
+        print("-" * 40)
+        for r in nvd_ranges:
+            vendor = r.get("vendor", "")
+            product = r.get("product", "")
+            constraint = r.get("constraint", "")
+            eco = r.get("inferred_ecosystem", "")
+            label = f"{vendor}:{product}"
+            if eco:
+                label += f" [{eco}]"
+            print(f"  {label}")
+            print(f"    Constraint: {constraint}")
+
+    # First patched versions summary
+    first_patched = payload.get("first_patched_versions", [])
+    if first_patched:
+        print()
+        print("First Patched Versions")
+        print("-" * 40)
+        for f in first_patched:
+            eco = f.get("ecosystem", "")
+            pkg = f.get("package", "")
+            ver = f.get("fixed_version", "")
+            print(f"  {eco}:{pkg} → {ver}")
+
+    # Summary
+    summary = payload.get("summary", {})
+    print()
+    print(f"Summary: {payload.get('message', '')}")
+    if summary.get("has_fix"):
+        print(f"  ✓ Fix available ({summary.get('fix_count', 0)} patched version(s))")
+    else:
+        print("  ✗ No fix version identified")
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2425,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "version-range":
+        idx = argv.index("version-range")
+        sys.exit(_run_version_range(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
