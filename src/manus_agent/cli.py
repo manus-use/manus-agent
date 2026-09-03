@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "sbom-scan",
 }
 
 
@@ -1935,6 +1936,105 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# sbom-scan subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_sbom_scan_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent sbom-scan",
+        description=(
+            "Scan a CycloneDX or SPDX SBOM for known vulnerabilities.\n"
+            "Queries OSV.dev in batch, enriches with EPSS and CISA KEV,\n"
+            "and ranks results by KEV membership then EPSS score."
+        ),
+        add_help=True,
+    )
+    p.add_argument("sbom_file", metavar="BOM-FILE", help="Path to CycloneDX or SPDX JSON SBOM file")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_sbom_scan(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_sbom_scan_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.scan_sbom import scan_sbom
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        result = scan_sbom(args.sbom_file)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # --- text output ---
+    print()
+    print(result["message"])
+    print("=" * 60)
+
+    findings = result.get("findings", [])
+    if not findings:
+        print("No vulnerabilities found — all clear! ✅")
+        return 0
+
+    stats = result.get("stats", {})
+    print(f"Components scanned: {result.get('total_components', 0)}")
+    print(f"Affected components: {stats.get('affected_components', 0)}")
+    print()
+
+    for i, f in enumerate(findings):
+        kev_marker = " 🔺KEV" if f.get("in_kev") else ""
+        cve_str = ", ".join(f.get("cve_ids", [])) or f["vuln_id"]
+        comp = f.get("component", {})
+        eco = f"{comp.get('ecosystem', '')}:" if comp.get("ecosystem") else ""
+        print(f"[{i + 1}] {f['vuln_id']}  ({f['severity']}){kev_marker}")
+        if cve_str != f["vuln_id"]:
+            print(f"    CVEs: {cve_str}")
+        print(f"    Component: {eco}{comp.get('name', '?')}@{comp.get('version', '?')}")
+        if f.get("epss", 0) > 0:
+            print(f"    EPSS: {f['epss']:.4f} ({f['epss'] * 100:.2f}%)")
+        if f.get("summary"):
+            summary = f["summary"]
+            if len(summary) > 120:
+                summary = summary[:117] + "..."
+            print(f"    {summary}")
+        print()
+
+    # Summary footer.
+    print("-" * 60)
+    if stats.get("kev_count"):
+        print(
+            f"⚠️  {stats['kev_count']} finding(s) in CISA KEV — these are actively exploited and should be prioritised."
+        )
+    print(
+        f"Severity: "
+        f"{stats.get('critical_count', 0)} critical, "
+        f"{stats.get('high_count', 0)} high, "
+        f"{stats.get('medium_count', 0)} medium, "
+        f"{stats.get('low_count', 0)} low"
+    )
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2368,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "sbom-scan":
+        idx = argv.index("sbom-scan")
+        sys.exit(_run_sbom_scan(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
