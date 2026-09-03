@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "silent-patches",
 }
 
 
@@ -1935,6 +1936,134 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# silent-patches subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_silent_patches_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent silent-patches",
+        description=(
+            "Scan a GitHub repository's commit history for security-relevant\n"
+            "fixes that were never assigned a CVE (silent patches). Uses a\n"
+            "two-stage heuristic: commit message keywords then diff keywords.\n"
+            "Each candidate is classified into one of 14 bug classes."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "repo",
+        metavar="OWNER/REPO",
+        help="Repository to scan (e.g. 'torvalds/linux' or full GitHub URL)",
+    )
+    p.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Start date for commit scan (default: 90 days ago)",
+    )
+    p.add_argument(
+        "--until",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="End date for commit scan (default: today)",
+    )
+    p.add_argument(
+        "--max-commits",
+        type=int,
+        default=500,
+        metavar="N",
+        help="Hard limit on commits fetched (default: 500)",
+    )
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Skip diff scoring (message keywords only)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_silent_patches(argv: list[str]) -> int:
+    import json as _json
+
+    from manus_agent.tools.detect_silent_patches import scan_silent_patches
+
+    parser = _build_silent_patches_parser()
+    args = parser.parse_args(argv)
+
+    repo_spec = args.repo.strip()
+    if not repo_spec:
+        parser.error("OWNER/REPO is required")
+
+    result = scan_silent_patches(
+        repo_spec,
+        since=args.since,
+        until=args.until,
+        max_commits=args.max_commits,
+        fast=args.fast,
+    )
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # Text output.
+    print(f"\n{'=' * 60}")
+    print(f"  Silent Patch Scan: {result['repo']}")
+    print(f"{'=' * 60}")
+    window = result["scan_window"]
+    since_str = window["since"][:10] if window.get("since") else "?"
+    until_str = window["until"][:10] if window.get("until") else "?"
+    print(f"  Window:            {since_str} → {until_str}")
+    print(f"  Commits scanned:   {result['commits_scanned']}")
+    print(f"  Skipped (has CVE): {result['commits_skipped_cve']}")
+    print(f"  Fast mode:         {'yes' if result['fast_mode'] else 'no'}")
+    print(f"  Candidates found:  {result['candidates_found']}")
+
+    candidates = result.get("candidates", [])
+    if not candidates:
+        print("\n  No silent-patch candidates detected.")
+        print(f"{'=' * 60}\n")
+        return 0
+
+    print(f"\n{'─' * 60}")
+    for i, c in enumerate(candidates, 1):
+        print(f"  [{i}] {c['sha']}  (score: {c['total_score']})")
+        print(f"      Date:   {c['date'][:10] if c.get('date') else '?'}")
+        print(f"      Author: {c.get('author', '?')}")
+        msg = c.get("message", "")
+        if len(msg) > 100:
+            msg = msg[:97] + "..."
+        print(f"      Msg:    {msg}")
+        classes = c.get("classification", [])
+        if classes:
+            print(f"      Class:  {', '.join(classes)}")
+        if c.get("url"):
+            print(f"      URL:    {c['url']}")
+        print()
+
+    summary = result.get("summary", {})
+    breakdown = summary.get("classification_breakdown", {})
+    if breakdown:
+        print(f"{'─' * 60}")
+        print("  Classification breakdown:")
+        for cls, count in sorted(breakdown.items(), key=lambda x: -x[1]):
+            print(f"    {cls}: {count}")
+
+    print(f"{'=' * 60}\n")
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2397,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "silent-patches":
+        idx = argv.index("silent-patches")
+        sys.exit(_run_silent_patches(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
