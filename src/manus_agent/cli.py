@@ -1057,7 +1057,121 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "epss-movers",
 }
+
+
+# ---------------------------------------------------------------------------
+# epss-movers subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_epss_movers_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent epss-movers",
+        description=(
+            "Detect CVEs with the largest EPSS score increases over a\n"
+            "configurable time window.  Identifies emerging threats by\n"
+            "comparing population-level EPSS snapshots."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        metavar="N",
+        help="Look-back window in days (default: 7, range: 1–365)",
+    )
+    p.add_argument(
+        "--top",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Number of top movers to return (default: 20, max: 100)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_epss_movers(argv: list[str]) -> int:
+    parser = _build_epss_movers_parser()
+    args = parser.parse_args(argv)
+
+    if args.days < 1 or args.days > 365:
+        parser.error("--days must be between 1 and 365")
+    if args.top < 1 or args.top > 100:
+        parser.error("--top must be between 1 and 100")
+
+    try:
+        from manus_agent.tools.get_epss_movers import compute_movers
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    from datetime import date, timedelta
+
+    today = date.today()
+    recent_date = today - timedelta(days=1)
+    baseline_date = recent_date - timedelta(days=args.days)
+
+    try:
+        data = compute_movers(
+            recent_date=recent_date,
+            baseline_date=baseline_date,
+            top=args.top,
+        )
+    except Exception as exc:
+        print(f"[error] EPSS API request failed: {exc}", file=sys.stderr)
+        return 1
+
+    movers = data.get("movers", [])
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(data, indent=2))
+        return 0
+
+    # Text output
+    if not movers:
+        print(
+            f"No significant EPSS movers found between "
+            f"{data['baseline_date']} and {data['recent_date']} "
+            f"(compared {data['total_compared']} CVEs)."
+        )
+        return 0
+
+    print(
+        f"\U0001f525 Top {len(movers)} EPSS movers "
+        f"({data['baseline_date']} \u2192 {data['recent_date']}, "
+        f"{args.days}-day window)"
+    )
+    print(
+        f"   Compared {data['total_compared']} CVEs, "
+        f"{data.get('total_with_increase', 0)} showed increases"
+    )
+    print()
+    print("  #   CVE                  Baseline  Recent    Delta     Change")
+    print("  --- -------------------- --------  --------  --------  -------")
+    for i, m in enumerate(movers, 1):
+        pct_str = (
+            f"+{m['pct_change']:.0f}%"
+            if m["pct_change"] is not None
+            else "NEW"
+        )
+        new_tag = " \U0001f195" if m["is_new"] else ""
+        print(
+            f"  {i:>2}. {m['cve']:<20} "
+            f"{m['baseline_epss']:.4f}    {m['recent_epss']:.4f}    "
+            f"+{m['delta']:.4f}    {pct_str}{new_tag}"
+        )
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1961,6 +2075,10 @@ def _build_run_parser() -> argparse.ArgumentParser:
             "  manus-agent epss-trend CVE-2024-3094\n"
             "  manus-agent epss-trend CVE-2024-3094 --days 90 --output json\n"
             "\n"
+            "  # EPSS movers (emerging threats)\n"
+            "  manus-agent epss-movers\n"
+            "  manus-agent epss-movers --days 30 --top 50 --output json\n"
+            "\n"
             "  # Patch diff summariser (fixing-commit analysis)\n"
             "  manus-agent patch-diff CVE-2024-3094\n"
             "  manus-agent patch-diff CVE-2024-3094 --output json\n"
@@ -2236,6 +2354,10 @@ def main() -> None:
     if first_positional == "variants":
         idx = argv.index("variants")
         sys.exit(_run_variants(argv[idx + 1 :]))
+
+    if first_positional == "epss-movers":
+        idx = argv.index("epss-movers")
+        sys.exit(_run_epss_movers(argv[idx + 1 :]))
 
     if first_positional == "epss-trend":
         idx = argv.index("epss-trend")
