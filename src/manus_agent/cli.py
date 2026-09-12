@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "vuln-report",
 }
 
 
@@ -1935,6 +1936,83 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# vuln-report subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_vuln_report_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent vuln-report",
+        description=(
+            "Generate a structured vulnerability intelligence report for one or more CVEs.\n"
+            "Aggregates NVD, EPSS, CISA KEV, VulnCheck KEV, and OSV.dev data into a\n"
+            "comprehensive report with executive summary, per-CVE details, severity\n"
+            "distribution, and remediation guidance."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_ids",
+        nargs="+",
+        metavar="CVE-ID",
+        help="One or more CVE identifiers (e.g. CVE-2024-3094 CVE-2021-44228)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text/markdown)",
+    )
+    p.add_argument(
+        "--title",
+        default="Vulnerability Intelligence Report",
+        help="Report title (default: 'Vulnerability Intelligence Report')",
+    )
+    p.add_argument(
+        "--out-file",
+        default="",
+        metavar="PATH",
+        help="Write report to a file instead of stdout",
+    )
+    return p
+
+
+def _run_vuln_report(argv: list[str]) -> int:
+    import re as _re
+
+    parser = _build_vuln_report_parser()
+    args = parser.parse_args(argv)
+
+    cve_ids: list[str] = args.cve_ids
+
+    # Validate all CVE IDs
+    invalid = [c for c in cve_ids if not _re.match(r"^CVE-\d{4}-\d+$", c.strip(), _re.IGNORECASE)]
+    if invalid:
+        parser.error(f"Invalid CVE ID(s): {', '.join(invalid)}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.generate_vuln_report import generate_report
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: failed to import generate_vuln_report: {exc}", file=__import__("sys").stderr)
+        return 1
+
+    fmt = "json" if args.output == "json" else "markdown"
+    result = generate_report(cve_ids, title=args.title, output_format=fmt)
+
+    output = result.get("report", "")
+
+    if args.out_file:
+        import pathlib
+
+        pathlib.Path(args.out_file).write_text(output, encoding="utf-8")
+        print(f"Report written to {args.out_file}")
+    else:
+        print(output)
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2346,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "vuln-report":
+        idx = argv.index("vuln-report")
+        sys.exit(_run_vuln_report(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
