@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "exploit-maturity",
 }
 
 
@@ -1935,6 +1936,67 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# exploit-maturity subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_exploit_maturity_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent exploit-maturity",
+        description=(
+            "Classify a CVE's exploit lifecycle stage using observed evidence\n"
+            "from multiple public intelligence sources (CISA KEV, VulnCheck KEV,\n"
+            "EPSS, NVD, GitHub PoCs, Exploit-DB, Trickest).\n\n"
+            "Returns one of four maturity stages:\n"
+            "  UNREPORTED → POC → WEAPONIZED → ACTIVELY_EXPLOITED"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_id",
+        metavar="CVE_ID",
+        help="CVE identifier to assess (e.g. CVE-2024-3094)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_exploit_maturity(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_exploit_maturity_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.get_exploit_maturity import (
+            _render_text,
+            assess_maturity,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = assess_maturity(args.cve_id)
+
+    if "error" in result and result.get("stage") is None:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2, default=str))
+    else:
+        print(_render_text(result))
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2330,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "exploit-maturity":
+        idx = argv.index("exploit-maturity")
+        sys.exit(_run_exploit_maturity(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
