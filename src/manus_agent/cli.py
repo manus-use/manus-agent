@@ -1935,6 +1935,143 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# sbom-scan subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_sbom_scan_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent sbom-scan",
+        description=(
+            "Scan a CycloneDX or SPDX SBOM (JSON) for known vulnerabilities.\n"
+            "Parses all components, queries OSV.dev in batch, enriches with\n"
+            "EPSS and CISA KEV status, and ranks by risk."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "sbom_file",
+        metavar="BOM-FILE",
+        help="Path to the SBOM file (CycloneDX or SPDX JSON).",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    p.add_argument(
+        "--skip-epss",
+        action="store_true",
+        default=False,
+        help="Skip EPSS enrichment (faster)",
+    )
+    p.add_argument(
+        "--skip-kev",
+        action="store_true",
+        default=False,
+        help="Skip CISA KEV enrichment (faster)",
+    )
+    return p
+
+
+def _run_sbom_scan(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_sbom_scan_parser()
+    args = parser.parse_args(argv)
+
+    sbom_path = args.sbom_file
+
+    try:
+        with open(sbom_path) as fh:
+            sbom_data = _json.load(fh)
+    except FileNotFoundError:
+        print(f"Error: SBOM file not found: {sbom_path}", file=sys.stderr)
+        return 1
+    except _json.JSONDecodeError as exc:
+        print(f"Error: Invalid JSON in SBOM file: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_agent.tools.scan_sbom import scan_sbom
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = scan_sbom(
+        sbom_data,
+        skip_epss=args.skip_epss,
+        skip_kev=args.skip_kev,
+    )
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # Text output
+    fmt = result.get("format", "unknown")
+    comp_count = result.get("component_count", 0)
+    vuln_comp = result.get("vulnerable_component_count", 0)
+    total_findings = result.get("total_finding_count", 0)
+    kev_count = result.get("kev_count", 0)
+    critical_count = result.get("critical_count", 0)
+
+    print()
+    print(f"SBOM Vulnerability Scan — {sbom_path}")
+    print("=" * 60)
+    print(f"Format:               {fmt}")
+    print(f"Components scanned:   {comp_count}")
+    print(f"Vulnerable components:{vuln_comp}")
+    print(f"Total findings:       {total_findings}")
+    if kev_count:
+        print(f"⚠️  KEV (actively exploited): {kev_count}")
+    if critical_count:
+        print(f"🔴 Critical (KEV or EPSS≥0.7): {critical_count}")
+    if not total_findings:
+        print("✅ No known vulnerabilities found.")
+    print()
+
+    for i, f in enumerate(result.get("findings", [])):
+        comp = f.get("component", {})
+        vuln_id = f.get("vuln_id", "")
+        aliases = f.get("aliases", [])
+        summary = f.get("summary", "")
+        epss = f.get("epss")
+        in_kev = f.get("in_kev", False)
+        fixed = f.get("fixed_versions", [])
+
+        cve_label = next((a for a in aliases if a.startswith("CVE-")), vuln_id)
+        eco = comp.get("ecosystem", "")
+        pkg = comp.get("name", "")
+        ver = comp.get("version", "")
+
+        kev_marker = " [KEV]" if in_kev else ""
+        epss_str = f"  EPSS: {epss:.4f}" if epss is not None else ""
+
+        print(f"[{i + 1}] {cve_label}{kev_marker}{epss_str}")
+        print(f"    Component: {pkg}@{ver}" + (f" ({eco})" if eco else ""))
+        if summary:
+            print(f"    Summary:   {summary[:120]}")
+        if fixed:
+            print(f"    Fixed in:  {', '.join(fixed[:5])}")
+
+        # Show severity if available
+        for sev in f.get("severity", []):
+            score = sev.get("score", "")
+            sev_type = sev.get("type", "")
+            if score:
+                print(f"    Severity:  {score}" + (f" ({sev_type})" if sev_type else ""))
+        print()
+
+    # Show errors if any
+    for err in result.get("errors", []):
+        print(f"⚠️  {err}", file=sys.stderr)
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2405,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "sbom-scan":
+        idx = argv.index("sbom-scan")
+        sys.exit(_run_sbom_scan(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
