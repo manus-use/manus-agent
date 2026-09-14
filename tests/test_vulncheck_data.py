@@ -615,10 +615,12 @@ def test_track_vendor_response_invalid_cve():
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_unknown_state_when_no_data(mock_vc, mock_cisa, mock_nvd):
-    mock_nvd.return_value = []
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_unknown_state_when_no_data(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {}
     mock_vc.return_value = {}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
@@ -630,10 +632,12 @@ def test_track_vendor_response_unknown_state_when_no_data(mock_vc, mock_cisa, mo
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_patch_tag_gives_patch_available(mock_vc, mock_cisa, mock_nvd):
-    mock_nvd.return_value = [{"tags": ["Patch", "Vendor Advisory"], "url": "https://example.com/patch"}]
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_patch_tag_gives_patch_available(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
+    mock_nvd.return_value = ([{"tags": ["Patch", "Vendor Advisory"], "url": "https://example.com/patch"}], "Analyzed")
     mock_cisa.return_value = {}
     mock_vc.return_value = {}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
@@ -644,11 +648,13 @@ def test_track_vendor_response_patch_tag_gives_patch_available(mock_vc, mock_cis
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_vulncheck_kev_hit_elevates_state(mock_vc, mock_cisa, mock_nvd):
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_vulncheck_kev_hit_elevates_state(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
     """VulnCheck KEV hit should elevate unknown → investigating."""
-    mock_nvd.return_value = []
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {}
     mock_vc.return_value = {"cveID": "CVE-2024-3094", "sources": ["FBI Flash"]}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
@@ -661,30 +667,35 @@ def test_track_vendor_response_vulncheck_kev_hit_elevates_state(mock_vc, mock_ci
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_vulncheck_kev_increases_confidence(mock_vc, mock_cisa, mock_nvd):
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_vulncheck_kev_increases_confidence(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
     """VulnCheck KEV hit should increase confidence above baseline."""
-    mock_nvd.return_value = []
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {}
     mock_vc.return_value = {"cveID": "CVE-2024-3094"}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
     payload = result["content"][0]["json"]
-    assert payload["confidence"] > 0.2  # above the absolute minimum
+    # confidence is now a string label; confidence_score is the float
+    assert payload["confidence_score"] > 0.2  # above the absolute minimum
 
 
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_cisa_kev_update_action(mock_vc, mock_cisa, mock_nvd):
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_cisa_kev_update_action(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
     """CISA KEV with 'Apply update' action should yield patch_available."""
-    mock_nvd.return_value = []
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {
         "cveID": "CVE-2024-3094",
         "requiredAction": "Apply update per vendor instructions.",
         "shortDescription": "Actively exploited.",
     }
     mock_vc.return_value = {}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
@@ -696,10 +707,12 @@ def test_track_vendor_response_cisa_kev_update_action(mock_vc, mock_cisa, mock_n
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_evidence_list_populated(mock_vc, mock_cisa, mock_nvd):
-    mock_nvd.return_value = [{"tags": ["Patch"], "url": "https://example.com"}]
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_evidence_list_populated(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
+    mock_nvd.return_value = ([{"tags": ["Patch"], "url": "https://example.com"}], "Analyzed")
     mock_cisa.return_value = {}
     mock_vc.return_value = {}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
@@ -711,26 +724,30 @@ def test_track_vendor_response_evidence_list_populated(mock_vc, mock_cisa, mock_
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_state_always_valid(mock_vc, mock_cisa, mock_nvd):
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_state_always_valid(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
     """Returned state must always be one of the 6 valid values."""
-    mock_nvd.return_value = []
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {}
     mock_vc.return_value = {}
-    from manus_agent.tools.track_vendor_response import _VALID_STATES, track_vendor_response
+    mock_ghsa.return_value = []
+    from manus_agent.tools.track_vendor_response import VALID_STATES, track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
     payload = result["content"][0]["json"]
-    assert payload["vendor_response_state"] in _VALID_STATES
+    assert payload["vendor_response_state"] in VALID_STATES
 
 
 @patch("manus_agent.tools.track_vendor_response._fetch_nvd_references")
 @patch("manus_agent.tools.track_vendor_response._fetch_cisa_kev")
 @patch("manus_agent.tools.track_vendor_response._fetch_vulncheck_kev")
-def test_track_vendor_response_ransomware_in_evidence(mock_vc, mock_cisa, mock_nvd):
+@patch("manus_agent.tools.track_vendor_response._fetch_ghsa")
+def test_track_vendor_response_ransomware_in_evidence(mock_ghsa, mock_vc, mock_cisa, mock_nvd):
     """Ransomware signal from VulnCheck should appear in evidence list."""
-    mock_nvd.return_value = []
+    mock_nvd.return_value = ([], "unknown")
     mock_cisa.return_value = {}
     mock_vc.return_value = {"cveID": "CVE-2024-3094", "ransomwareUse": True}
+    mock_ghsa.return_value = []
     from manus_agent.tools.track_vendor_response import track_vendor_response
 
     result = track_vendor_response(_make_tool_use())
