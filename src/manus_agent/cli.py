@@ -1935,6 +1935,146 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# silent-patches
+# ---------------------------------------------------------------------------
+
+
+def _build_silent_patches_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="manus-agent silent-patches",
+        description="Detect silent security patches in a GitHub repository.",
+    )
+    parser.add_argument(
+        "owner_repo",
+        help="GitHub owner/repo (e.g. torvalds/linux)",
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Start date YYYY-MM-DD (default: 90 days ago)",
+    )
+    parser.add_argument(
+        "--until",
+        default=None,
+        help="End date YYYY-MM-DD (default: today)",
+    )
+    parser.add_argument(
+        "--max-commits",
+        type=int,
+        default=500,
+        help="Maximum commits to scan (default: 500)",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Skip diff scoring (message keywords only)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return parser
+
+
+def _run_silent_patches(argv: list[str]) -> int:  # noqa: C901
+    import json as _json
+
+    parser = _build_silent_patches_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.detect_silent_patches import scan_repository
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    owner_repo = args.owner_repo.strip()
+    if "/" not in owner_repo:
+        print("Error: owner_repo must be 'owner/repo' format.", file=sys.stderr)
+        return 1
+
+    owner, repo = owner_repo.split("/", 1)
+
+    try:
+        data = scan_repository(
+            owner=owner,
+            repo=repo,
+            since=args.since,
+            until=args.until,
+            max_commits=args.max_commits,
+            fast=args.fast,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    candidates = data.get("candidates", [])
+    summary = data.get("summary", {})
+
+    if args.output == "json":
+        print(_json.dumps(data, indent=2))
+        return 0
+
+    # ── Text output ──────────────────────────────────────────────────
+    print()
+    print(f"Silent Patch Detector — {owner}/{repo}")
+    print("=" * 60)
+    print(f"Scan window:  {data.get('since', '?')} → {data.get('until', '?')}")
+    print(f"Commits scanned: {data.get('total_commits_scanned', 0)}")
+    mode_label = "fast (message only)" if data.get("fast_mode") else "full (message + diff)"
+    print(f"Scoring mode: {mode_label}")
+    print()
+
+    if not candidates:
+        print("No silent patch candidates found.")
+        return 0
+
+    print(f"Candidates found: {summary.get('total_candidates', 0)}")
+    high = summary.get("high_confidence", 0)
+    medium = summary.get("medium_confidence", 0)
+    low = summary.get("low_confidence", 0)
+    print(f"  🔴 HIGH confidence:   {high}")
+    print(f"  🟡 MEDIUM confidence: {medium}")
+    print(f"  ⚪ LOW confidence:    {low}")
+    print()
+
+    bug_dist = summary.get("bug_class_distribution", {})
+    if bug_dist:
+        print("Bug class distribution:")
+        for bc, count in bug_dist.items():
+            print(f"  • {bc}: {count}")
+        print()
+
+    print("-" * 60)
+    for i, c in enumerate(candidates):
+        conf = c.get("confidence", "?")
+        emoji = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "⚪"}.get(conf, "❓")
+        print(f"{emoji} [{conf}] {c.get('short_sha', '?')} — score {c.get('total_score', 0):.0f}/100")
+        print(f"  Message: {c.get('message', '(none)')}")
+        print(f"  Author:  {c.get('author', '?')} | Date: {c.get('date', '?')}")
+        if c.get("bug_classes"):
+            print(f"  Bug classes: {', '.join(c['bug_classes'])}")
+        print(f"  Scores: message={c.get('message_score', 0):.0f}  diff={c.get('diff_score', 0):.0f}")
+        print(f"  URL: {c.get('url', '')}")
+        if i < len(candidates) - 1:
+            print()
+
+    if data.get("errors"):
+        print()
+        print("Warnings:")
+        for err in data["errors"]:
+            print(f"  ⚠️  {err}")
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2408,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "silent-patches":
+        idx = argv.index("silent-patches")
+        sys.exit(_run_silent_patches(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
