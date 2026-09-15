@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "exploit-chain",
 }
 
 
@@ -2198,6 +2199,122 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# exploit-chain subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_exploit_chain_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent exploit-chain",
+        description=(
+            "Map potential exploit chains across multiple CVEs affecting the same\n"
+            "product or system.  Fetches NVD + EPSS data, classifies each CVE's\n"
+            "attack-chain role (initial access, privilege escalation, info disclosure,\n"
+            "code execution, …) and enumerates ranked multi-step attack paths."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "cve_ids",
+        nargs="+",
+        metavar="CVE-ID",
+        help="Two or more CVE identifiers to analyse (e.g., CVE-2024-3094 CVE-2024-3095).",
+    )
+    p.add_argument(
+        "--max-depth",
+        type=int,
+        default=4,
+        choices=range(2, 7),
+        metavar="N",
+        help="Maximum chain length (default 4, range 2-6).",
+    )
+    p.add_argument(
+        "--max-chains",
+        type=int,
+        default=10,
+        help="Maximum number of chains to display (default 10).",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text).",
+    )
+    return p
+
+
+def _run_exploit_chain(argv: list[str]) -> int:
+    parser = _build_exploit_chain_parser()
+    args = parser.parse_args(argv)
+    cve_ids = [c.strip() for c in args.cve_ids if c.strip()]
+
+    if len(cve_ids) < 2:
+        parser.error("At least 2 CVE IDs are required.")
+
+    try:
+        from manus_agent.tools.map_exploit_chain import map_exploit_chains
+    except ImportError as exc:
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    payload = map_exploit_chains(
+        cve_ids,
+        max_depth=args.max_depth,
+        max_chains=args.max_chains,
+    )
+
+    if args.output == "json":
+        import json
+
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    # --- text output ---
+    console.print(f"\n[bold blue]{payload['message']}[/bold blue]")
+
+    if payload.get("shared_products"):
+        console.print(f"[dim]Shared products: {', '.join(payload['shared_products'])}[/dim]\n")
+
+    # CVE role table
+    console.print("[bold]CVE Role Assignment[/bold]")
+    for cve in payload["enriched_cves"]:
+        roles = ", ".join(cve["chain_roles"])
+        score = f"CVSS {cve['cvss_score']}" if cve["cvss_score"] else "no CVSS"
+        epss = f", EPSS {cve['epss_score']:.4f}" if cve.get("epss_score") else ""
+        console.print(f"  {cve['cve_id']}  [{roles}]  ({score}{epss})")
+
+    # Chains
+    if payload["chains"]:
+        console.print(f"\n[bold]Top Exploit Chains[/bold] ({payload['chain_count']} total, showing {payload['top_chain_count']})")
+        for idx, chain in enumerate(payload["chains"], 1):
+            arrow = " → ".join(
+                f"{s['cve_id']}({','.join(s['roles'])})" for s in chain["steps"]
+            )
+            feasibility_color = {
+                "HIGH": "red", "MEDIUM": "yellow",
+                "LOW": "blue", "THEORETICAL": "dim",
+            }.get(chain["feasibility"], "white")
+            console.print(
+                f"\n  [{feasibility_color}]Chain {idx}: {chain['feasibility']} feasibility[/{feasibility_color}] "
+                f"(score {chain['chain_score']})"
+            )
+            console.print(f"    Path: {arrow}")
+            console.print(
+                f"    Mean CVSS: {chain['mean_cvss']}  |  "
+                f"Mean EPSS: {chain['mean_epss']:.5f}  |  "
+                f"Steps: {chain['length']}"
+            )
+    else:
+        console.print("\n[dim]No feasible exploit chains found between these CVEs.[/dim]")
+
+    if payload.get("errors"):
+        for err in payload["errors"]:
+            console.print(f"  [yellow]⚠ {err}[/yellow]")
+
+    return 0
+
+
 def main() -> None:
     """Main CLI entry point."""
     argv = sys.argv[1:]
@@ -2268,6 +2385,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "exploit-chain":
+        idx = argv.index("exploit-chain")
+        sys.exit(_run_exploit_chain(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
