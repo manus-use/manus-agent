@@ -26,6 +26,7 @@ Built on [Strands SDK](https://github.com/strands-agents/sdk-python) and integra
   - [exploit-complexity](#manus-agent-exploit-complexity-cve-id--exploit-complexity-scorer)
   - [poc-search](#manus-agent-poc-search-cve-id--multi-source-poc-aggregator)
   - [blast-radius](#manus-agent-blast-radius-spec--dependency-blast-radius)
+  - [exploit-chain](#manus-agent-exploit-chain-cve-ids--exploit-chain-mapper)
   - [silent-patches](#manus-agent-silent-patches-ownerrepo--silent-patch-detector)
   - [cve-timeline](#manus-agent-cve-timeline-cve-id--cve-timeline)
   - [version-range](#manus-agent-version-range-cve-id--affected-version-ranges)
@@ -341,6 +342,41 @@ Blast-radius labels per package:
 |------|---------|-------------|
 | `--max-packages N` | `10` | Max affected packages to enrich |
 | `--output {text,json}` | `text` | Output format |
+
+---
+
+### `manus-agent exploit-chain <CVE-IDs>` — Exploit chain mapper
+
+```bash
+# Map potential exploit chains across multiple CVEs
+manus-agent exploit-chain CVE-2024-3094 CVE-2024-3095 CVE-2024-3096
+
+# JSON output for automation
+manus-agent exploit-chain CVE-2024-3094 CVE-2024-3095 --output json
+
+# Control chain depth and result count
+manus-agent exploit-chain CVE-2024-1111 CVE-2024-2222 CVE-2024-3333 --max-depth 6 --max-chains 20
+```
+
+Maps potential multi-step exploit chains across 2–8 CVEs affecting the same product or system. Fetches NVD data and EPSS scores, classifies each CVE's attack-chain role based on CWE and CVSS properties, then enumerates and ranks feasible attack paths.
+
+**Chain roles** (assigned per CVE based on CWE category):
+- `initial_access` — entry point (injection, SSRF, exposed service)
+- `info_disclosure` — leak secrets, tokens, memory, paths
+- `auth_bypass` — skip authentication / authorization checks
+- `priv_escalation` — elevate from low to high privilege
+- `code_execution` — run arbitrary code
+- `lateral_movement` — pivot to other systems / components
+- `persistence` — maintain access
+- `dos` — denial of service (chain terminator)
+
+**Scoring** considers mean CVSS severity, mean EPSS exploitation probability, and a length penalty (shorter chains = more practical). Feasibility labels: HIGH, MEDIUM, LOW, THEORETICAL.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | `text` | Output format (`text` or `json`) |
+| `--max-depth` | `4` | Maximum chain length (2–6) |
+| `--max-chains` | `10` | Maximum chains to display |
 
 ---
 
