@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-freshness",
     "changelog",
     "blast-radius",
 }
@@ -1525,6 +1526,125 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
 
+    return 0
+
+
+
+
+# ---------------------------------------------------------------------------
+# poc-freshness subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_freshness_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-freshness",
+        description=(
+            "Measure PoC freshness for a CVE \u2014 how recently exploit activity\n"
+            "occurred across GitHub repos, Exploit-DB, and trickest/cve.\n"
+            "A high freshness score means attacker interest is ongoing."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_poc_freshness(argv: list[str]) -> int:
+    import json as _json
+    import re as _re
+
+    parser = _build_poc_freshness_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.get_poc_freshness import get_poc_freshness
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = get_poc_freshness(cve_id)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # ---- text output ----
+    score = result.get("freshness_score", 0)
+    label = result.get("label", "Unknown")
+    most_recent = result.get("most_recent_activity") or "N/A"
+    days_since = result.get("days_since_last_activity")
+    signals = result.get("signals", {})
+
+    # Score bar visualisation
+    bar_len = 20
+    filled = round(score / 100 * bar_len)
+    bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+
+    print()
+    print(f"  PoC Freshness: {cve_id.upper()}")
+    print(f"  Score: {score}/100  [{bar}]  {label}")
+    print()
+
+    if days_since is not None:
+        print(f"  Most recent activity : {most_recent}")
+        print(f"  Days since last      : {days_since:.0f}")
+    else:
+        print("  No PoC activity found.")
+    print()
+
+    # --- GitHub signal ---
+    gh = signals.get("github", {})
+    print(f"  GitHub repos found   : {gh.get('repos_found', 0)}")
+    if gh.get("repos_found", 0) > 0:
+        print(f"    Total stars        : {gh.get('total_stars', 0)}")
+        print(f"    Total forks        : {gh.get('total_forks', 0)}")
+        if gh.get("most_recent_push"):
+            print(f"    Most recent push   : {gh['most_recent_push']}")
+        print(f"    Score contribution : {gh.get('score_contribution', 0):.1f}")
+
+    # --- Exploit-DB signal ---
+    edb = signals.get("exploit_db", {})
+    print(f"  Exploit-DB entries   : {edb.get('entries_found', 0)}")
+    if edb.get("entries_found", 0) > 0:
+        if edb.get("most_recent_date"):
+            print(f"    Most recent date   : {edb['most_recent_date']}")
+        print(f"    Score contribution : {edb.get('score_contribution', 0):.1f}")
+
+    # --- trickest signal ---
+    tri = signals.get("trickest", {})
+    indexed = "yes" if tri.get("indexed") else "no"
+    print(f"  trickest/cve indexed : {indexed}")
+    if tri.get("indexed"):
+        print(f"    PoC links          : {tri.get('poc_count', 0)}")
+        print(f"    Score contribution : {tri.get('score_contribution', 0):.1f}")
+
+    # --- Top GitHub repos ---
+    repos = result.get("github_repos", [])
+    if repos:
+        print()
+        print("  Top GitHub PoC repos:")
+        for repo in repos[:5]:
+            stars = repo.get("stargazers_count", 0)
+            pushed = (repo.get("pushed_at") or "?")[:10]
+            name = repo.get("full_name", "?")
+            print(f"    \u2605 {stars:<5}  {pushed}  {name}")
+
+    print()
     return 0
 
 
@@ -2260,6 +2380,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-freshness":
+        idx = argv.index("poc-freshness")
+        sys.exit(_run_poc_freshness(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
