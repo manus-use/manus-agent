@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "silent-patches",
 }
 
 
@@ -1935,6 +1936,170 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# silent-patches subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_silent_patches_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent silent-patches",
+        description=(
+            "Scan a GitHub repository's commit history for security fixes that were\n"
+            "never assigned a CVE (silent patches).  Uses two-stage heuristic scoring:\n"
+            "commit message keywords then diff keywords.  Each candidate commit is\n"
+            "labelled with one of 14 bug classes and a confidence score (0-100)."
+        ),
+        add_help=True,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "repo",
+        help="GitHub repository (owner/repo or full URL).",
+    )
+    p.add_argument(
+        "--since",
+        default=None,
+        help="Start date for commit scan (YYYY-MM-DD). Default: 90 days ago.",
+    )
+    p.add_argument(
+        "--until",
+        default=None,
+        help="End date for commit scan (YYYY-MM-DD). Default: today.",
+    )
+    p.add_argument(
+        "--max-commits",
+        type=int,
+        default=500,
+        help="Hard limit on commits fetched (default: 500).",
+    )
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        default=False,
+        help="Skip diff scoring (message keywords only).",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text).",
+    )
+    return p
+
+
+def _run_silent_patches(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_silent_patches_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.detect_silent_patches import (
+            detect_silent_patches,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        data = detect_silent_patches(
+            repo=args.repo,
+            since=args.since,
+            until=args.until,
+            max_commits=args.max_commits,
+            fast=args.fast,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(data, indent=2))
+        return 0
+
+    # Text output
+    repo_label = data["repo"]
+    window = data["scan_window"]
+    total = data["total_commits_scanned"]
+    candidates = data["candidates"]
+    summary = data["summary"]
+
+    print()
+    print(f"Silent Patch Detector — {repo_label}")
+    print("=" * 60)
+    print(f"Scan window:     {window['since'][:10]} → {window['until'][:10]}")
+    print(f"Commits scanned: {total}")
+    print(f"Candidates found: {len(candidates)}")
+    if summary["fast_mode"]:
+        print("Mode:            fast (message keywords only)")
+    print()
+
+    if not candidates:
+        print("No silent patch candidates detected.")
+        return 0
+
+    # Classification emoji mapping
+    class_emoji = {
+        "sql_injection": "💉",
+        "command_injection": "💻",
+        "path_traversal": "📂",
+        "buffer_overflow": "💥",
+        "integer_overflow": "🔢",
+        "use_after_free": "🗑️",
+        "null_dereference": "⬛",
+        "auth_bypass": "🔓",
+        "xss": "🌐",
+        "csrf": "🔄",
+        "ssrf": "🏠",
+        "information_disclosure": "📡",
+        "denial_of_service": "🚫",
+        "deserialization": "📦",
+        "unknown_security": "🔒",
+    }
+    conf_emoji = {
+        "high": "🔴",
+        "medium": "🟠",
+        "low": "🟡",
+        "informational": "⚪",
+    }
+
+    for i, c in enumerate(candidates):
+        cls_icon = class_emoji.get(c["classification"], "🔒")
+        conf_icon = conf_emoji.get(c["confidence"], "⚪")
+        print(f"[{i + 1}] {conf_icon} {c['short_sha']}  score={c['score']}  confidence={c['confidence']}")
+        print(f"    {cls_icon} {c['classification']}")
+        print(f"    {c['message']}")
+        print(f"    {c['url']}")
+        if c["stage2_applied"]:
+            print("    (diff scoring applied)")
+        print()
+
+    # Summary
+    print("-" * 60)
+    print("Summary by classification:")
+    for cls, count in sorted(summary["by_classification"].items(), key=lambda x: x[1], reverse=True):
+        emoji = class_emoji.get(cls, "🔒")
+        print(f"  {emoji} {cls}: {count}")
+    print()
+    print("Summary by confidence:")
+    for conf, count in sorted(
+        summary["by_confidence"].items(),
+        key=lambda x: (
+            ["high", "medium", "low", "informational"].index(x[0])
+            if x[0] in ["high", "medium", "low", "informational"]
+            else 99
+        ),
+    ):
+        emoji = conf_emoji.get(conf, "⚪")
+        print(f"  {emoji} {conf}: {count}")
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2433,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "silent-patches":
+        idx = argv.index("silent-patches")
+        sys.exit(_run_silent_patches(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
