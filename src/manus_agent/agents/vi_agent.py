@@ -119,6 +119,7 @@ class VulnerabilityIntelligenceAgent:
             from manus_agent.tools.get_patch_diff import get_patch_diff
             from manus_agent.tools.get_poc_week import get_poc_week
             from manus_agent.tools.get_trickest_pocs import get_trickest_pocs
+            from manus_agent.tools.get_version_range import get_version_range
             from manus_agent.tools.get_vulncheck_data import get_vulncheck_data
             from manus_agent.tools.score_exploit_complexity import score_exploit_complexity
             from manus_agent.tools.search_poc_sources import search_poc_sources
@@ -178,6 +179,7 @@ class VulnerabilityIntelligenceAgent:
             get_vulncheck_data,
             search_poc_sources,
             get_dependency_blast_radius,
+            get_version_range,
         ]
         if use_browser is not None:
             tools.append(use_browser)
