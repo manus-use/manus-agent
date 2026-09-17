@@ -1038,6 +1038,227 @@ def _run_variants(argv: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# config show subcommand
+# ---------------------------------------------------------------------------
+
+# Fields whose values should be masked unless --reveal is given.
+_SECRET_FIELD_NAMES: frozenset[str] = frozenset(
+    {"api_key", "api_token", "cve_submit_url", "document_url", "server_url"}
+)
+
+
+def _build_config_show_parser() -> argparse.ArgumentParser:
+    """Build the ``config show`` subcommand parser."""
+    parser = argparse.ArgumentParser(
+        prog="manus-agent config show",
+        description=(
+            "Display the fully-resolved configuration after merging config.toml, "
+            ".env files, and environment variable overrides.  Secrets are redacted "
+            "by default — pass --reveal to display them."
+        ),
+    )
+    parser.add_argument(
+        "--config",
+        metavar="FILE",
+        type=Path,
+        default=None,
+        help="Path to a config.toml file (overrides default search paths)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    parser.add_argument(
+        "--reveal",
+        action="store_true",
+        default=False,
+        help="Show secret values instead of redacting them",
+    )
+    parser.add_argument(
+        "--section",
+        metavar="NAME",
+        default=None,
+        help="Show only a specific config section (e.g. llm, sandbox, tools)",
+    )
+    return parser
+
+
+def _redact(value: str) -> str:
+    """Return a redacted version of *value*, keeping the first 4 characters."""
+    if len(value) <= 4:  # noqa: PLR2004
+        return "****"
+    return value[:4] + "*" * min(len(value) - 4, 12)
+
+
+def _resolve_config_path(explicit: Path | None) -> Path | None:
+    """Return the first config.toml that exists, or *None*."""
+    if explicit is not None:
+        return explicit if explicit.exists() else None
+    for candidate in (
+        Path("config.toml"),
+        Path("config/config.toml"),
+        _DEFAULT_CONFIG_PATH,
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _section_to_dict(
+    section: object,
+    *,
+    reveal: bool,
+) -> dict[str, object]:
+    """Convert a Pydantic sub-model to an ordered dict, redacting secrets."""
+    out: dict[str, object] = {}
+    for field_name in type(section).model_fields:
+        value = getattr(section, field_name)
+        if (
+            not reveal
+            and field_name in _SECRET_FIELD_NAMES
+            and isinstance(value, str)
+        ):
+            value = _redact(value)
+        out[field_name] = value
+    return out
+
+
+def _config_to_dict(config: Config, *, reveal: bool) -> dict[str, dict[str, object]]:
+    """Build a nested dict from the fully-resolved *config*."""
+    sections: dict[str, dict[str, object]] = {}
+    for section_name in type(config).model_fields:
+        section_obj = getattr(config, section_name)
+        sections[section_name] = _section_to_dict(section_obj, reveal=reveal)
+    return sections
+
+
+def _source_label(
+    section_name: str,
+    field_name: str,
+    config_file_data: dict[str, dict[str, object]],
+    config: Config,
+) -> str:
+    """Determine the source of a config value: 'config', 'env', or 'default'."""
+    # Check if the field was set in the config file.
+    file_section = config_file_data.get(section_name, {})
+    if field_name in file_section:
+        return "config"
+
+    # Check if the field was overridden by an env var.
+    section_obj = getattr(config, section_name)
+    field_value = getattr(section_obj, field_name)
+    default_section = type(section_obj)()
+    default_value = getattr(default_section, field_name)
+
+    if field_value != default_value:
+        return "env"
+
+    return "default"
+
+
+def _print_text(
+    data: dict[str, dict[str, object]],
+    config_file_data: dict[str, dict[str, object]],
+    config: Config,
+    config_path: Path | None,
+) -> None:
+    """Pretty-print config as a Rich table."""
+    if config_path:
+        console.print(f"Config file: [bold]{config_path}[/bold]")
+    else:
+        console.print("Config file: [dim]none (using defaults + env vars)[/dim]")
+    console.print()
+
+    for section_name, fields in data.items():
+        table = Table(
+            title=f"[bold cyan]{section_name}[/bold cyan]",
+            show_header=True,
+            header_style="bold",
+            border_style="dim",
+            title_justify="left",
+        )
+        table.add_column("Field", style="cyan", no_wrap=True)
+        table.add_column("Value")
+        table.add_column("Source", style="dim")
+
+        for field_name, value in fields.items():
+            source = _source_label(section_name, field_name, config_file_data, config)
+            if source == "config":
+                source_str = "[green]config[/green]"
+            elif source == "env":
+                source_str = "[yellow]env[/yellow]"
+            else:
+                source_str = "[dim]default[/dim]"
+
+            # Format the value for display.
+            if value is None:
+                display = "[dim]—[/dim]"
+            elif isinstance(value, list):
+                display = ", ".join(str(v) for v in value) if value else "[dim]—[/dim]"
+            elif isinstance(value, bool):
+                display = "[green]true[/green]" if value else "[red]false[/red]"
+            else:
+                display = str(value)
+
+            table.add_row(field_name, display, source_str)
+
+        console.print(table)
+        console.print()
+
+
+def _cmd_config_show(args: argparse.Namespace) -> int:
+    """Display the fully-resolved configuration."""
+    config_path = _resolve_config_path(args.config)
+
+    # Load raw file data to determine "source" labels.
+    config_file_data: dict[str, dict[str, object]] = {}
+    if config_path and config_path.exists():
+        try:
+            raw = toml.load(config_path)
+            for k, v in raw.items():
+                if isinstance(v, dict):
+                    config_file_data[k] = v
+        except Exception:
+            pass  # If we can't parse for sourcing, everything shows as default/env.
+
+    # Load the fully-resolved config.
+    try:
+        config = Config.from_file(args.config)
+    except Exception as exc:
+        console.print(f"[red]Error loading config:[/red] {exc}")
+        return 1
+
+    data = _config_to_dict(config, reveal=args.reveal)
+
+    # Filter to a single section if requested.
+    if args.section:
+        section_key = args.section.lower().replace("-", "_")
+        if section_key not in data:
+            valid = ", ".join(sorted(data))
+            console.print(
+                f"[red]Unknown section:[/red] {args.section}  "
+                f"(valid: {valid})"
+            )
+            return 1
+        data = {section_key: data[section_key]}
+
+    if args.output == "json":
+        # Convert non-serialisable values.
+        def _json_default(obj: object) -> object:
+            if isinstance(obj, Path):
+                return str(obj)
+            raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+        print(json.dumps(data, indent=2, default=_json_default))
+    else:
+        _print_text(data, config_file_data, config, config_path)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # main() entry point
 # ---------------------------------------------------------------------------
 
@@ -1057,6 +1278,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "config",
 }
 
 
@@ -2294,6 +2516,15 @@ def main() -> None:
                 config=config,
             )
         )
+
+    if first_positional == "config":
+        idx = argv.index("config")
+        rest = argv[idx + 1 :]
+        # "config show" is the default (and currently only) sub-subcommand.
+        if rest and rest[0] == "show":
+            rest = rest[1:]
+        config_show_args = _build_config_show_parser().parse_args(rest)
+        sys.exit(_cmd_config_show(config_show_args))
 
     # Default: run / interactive
     run_parser = _build_run_parser()

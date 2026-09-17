@@ -132,6 +132,21 @@ manus-agent doctor --config ./custom.toml
 
 Checks Python packages, config file validity, and API key accessibility.
 
+### `manus-agent config show` — Display resolved configuration
+
+```bash
+manus-agent config show                     # pretty-print all sections
+manus-agent config show --output json       # machine-readable JSON
+manus-agent config show --section llm       # single section
+manus-agent config show --reveal            # unmask secrets
+manus-agent config show --config ./my.toml  # use a specific config file
+```
+
+Shows the fully-resolved configuration after merging `config.toml`, `.env`
+files, and `MANUS_*` environment variables.  Each field is annotated with its
+source (`config`, `env`, or `default`).  Secrets (API keys, tokens, URLs) are
+redacted by default — pass `--reveal` to display them.
+
 ### `manus-agent history` — Browse past runs
 
 ```bash
