@@ -250,16 +250,11 @@ async def browser(task: str) -> dict:
     Args:
         task: The specific task.
     """
-    result = await runner.recerun_browser_task(task)
-    # Return a valid AssetMatch object
-    # return AssetMatch(
+    result_json = await runner.run_browser_task(task, BrowserTaskResult)
+    result = BrowserTaskResult.model_validate_json(result_json)
     return {
-        "result": f"{result.result}",
-        # precisely_matched_assets=0,
-        # fuzzy_matched_asset=0
+        "result": result.result,
     }
-    # Ensure we return a Pydantic model, not a dict or JSON string
-    # return AssetMatch.model_validate_json(result_model)
 
 
 async def main():
