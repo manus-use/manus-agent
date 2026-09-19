@@ -243,6 +243,125 @@ def _classify(
     return state, round(confidence, 3), evidence
 
 
+# ---------------------------------------------------------------------------
+# CLI helpers — used by ``manus-agent vendor-response`` subcommand
+# ---------------------------------------------------------------------------
+
+# State emoji for human-readable output.
+_STATE_EMOJI: dict[str, str] = {
+    "patch_available": "\u2705",
+    "patch_pending": "\u23f3",
+    "workaround_only": "\u26a0\ufe0f",
+    "investigating": "\U0001f50d",
+    "no_patch_expected": "\u274c",
+    "unknown": "\u2753",
+}
+
+# Human-readable labels for each state.
+_STATE_LABELS: dict[str, str] = {
+    "patch_available": "Patch Available",
+    "patch_pending": "Patch Pending",
+    "workaround_only": "Workaround Only",
+    "investigating": "Investigating",
+    "no_patch_expected": "No Patch Expected",
+    "unknown": "Unknown",
+}
+
+
+def _confidence_bar(confidence: float, width: int = 20) -> str:
+    """Return a text progress bar for *confidence* (0.0–1.0)."""
+    filled = int(round(confidence * width))
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
+def _confidence_label(confidence: float) -> str:
+    """Map a confidence score to a human-readable tier."""
+    if confidence >= 0.9:
+        return "High"
+    if confidence >= 0.6:
+        return "Medium"
+    if confidence >= 0.3:
+        return "Low"
+    return "Very Low"
+
+
+def _run_tracking(cve_id: str) -> dict[str, Any]:
+    """Execute vendor-response tracking and return a result dict.
+
+    Suitable for both the Strands tool entry-point and the CLI subcommand.
+    """
+    cve_id = cve_id.upper()
+    api_key = os.environ.get("VULNCHECK_API_KEY", "").strip()
+
+    references = _fetch_nvd_references(cve_id)
+    cisa_kev = _fetch_cisa_kev(cve_id)
+    vulncheck_kev = _fetch_vulncheck_kev(cve_id, api_key)
+
+    nvd_status = "unknown"
+    if references:
+        nvd_status = "analyzed"
+
+    state, confidence, evidence = _classify(references, cisa_kev, vulncheck_kev, nvd_status)
+
+    return {
+        "cve_id": cve_id,
+        "vendor_response_state": state,
+        "confidence": confidence,
+        "evidence": evidence,
+        "signals": {
+            "nvd_references_found": len(references),
+            "cisa_kev_hit": bool(cisa_kev),
+            "vulncheck_kev_hit": bool(vulncheck_kev),
+            "vulncheck_api_key_present": bool(api_key),
+        },
+    }
+
+
+def _render_text(result: dict[str, Any]) -> str:
+    """Render a vendor-response result dict as human-readable text."""
+    lines: list[str] = []
+    cve_id = result["cve_id"]
+    state = result["vendor_response_state"]
+    confidence = result["confidence"]
+    evidence = result.get("evidence") or []
+    signals = result.get("signals") or {}
+
+    emoji = _STATE_EMOJI.get(state, "")
+    label = _STATE_LABELS.get(state, state)
+    conf_label = _confidence_label(confidence)
+
+    lines.append(f"Vendor Response — {cve_id}")
+    lines.append("=" * len(lines[0]))
+    lines.append("")
+    lines.append(f"  Status:     {emoji}  {label} ({state})")
+    lines.append(f"  Confidence: {_confidence_bar(confidence)} {confidence:.1%} ({conf_label})")
+    lines.append("")
+
+    # Signals summary
+    lines.append("Signals")
+    lines.append("-" * 40)
+    nvd_refs = signals.get("nvd_references_found", 0)
+    lines.append(f"  NVD references : {nvd_refs}")
+    lines.append(f"  CISA KEV hit   : {'Yes' if signals.get('cisa_kev_hit') else 'No'}")
+    vc_hit = signals.get("vulncheck_kev_hit", False)
+    vc_key = signals.get("vulncheck_api_key_present", False)
+    if vc_key:
+        lines.append(f"  VulnCheck KEV  : {'Yes' if vc_hit else 'No'}")
+    else:
+        lines.append("  VulnCheck KEV  : N/A (no API key)")
+    lines.append("")
+
+    # Evidence
+    if evidence:
+        lines.append("Evidence")
+        lines.append("-" * 40)
+        for item in evidence:
+            lines.append(f"  • {item}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def track_vendor_response(tool: ToolUse, **kwargs: Any) -> ToolResult:
     """Classify vendor patch/response status for a CVE using NVD + KEV sources."""
     tool_use_id = tool["toolUseId"]
@@ -258,36 +377,7 @@ def track_vendor_response(tool: ToolUse, **kwargs: Any) -> ToolResult:
         log_tool_output_size("track_vendor_response", result)
         return result
 
-    cve_id = cve_id.upper()
-    api_key = os.environ.get("VULNCHECK_API_KEY", "").strip()
-
-    # Gather data from each source independently (failures are non-fatal).
-    references = _fetch_nvd_references(cve_id)
-    cisa_kev = _fetch_cisa_kev(cve_id)
-    vulncheck_kev = _fetch_vulncheck_kev(cve_id, api_key)
-
-    # Derive NVD vuln status from reference tags if available.
-    nvd_status = "unknown"
-    if references:
-        nvd_status = "analyzed"
-
-    state, confidence, evidence = _classify(references, cisa_kev, vulncheck_kev, nvd_status)
-
-    vulncheck_kev_hit = bool(vulncheck_kev)
-    cisa_kev_hit = bool(cisa_kev)
-
-    payload: dict[str, Any] = {
-        "cve_id": cve_id,
-        "vendor_response_state": state,
-        "confidence": confidence,
-        "evidence": evidence,
-        "signals": {
-            "nvd_references_found": len(references),
-            "cisa_kev_hit": cisa_kev_hit,
-            "vulncheck_kev_hit": vulncheck_kev_hit,
-            "vulncheck_api_key_present": bool(api_key),
-        },
-    }
+    payload = _run_tracking(cve_id)
 
     result = {
         "toolUseId": tool_use_id,
