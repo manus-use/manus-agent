@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "vendor-response",
 }
 
 
@@ -1764,6 +1765,59 @@ def _run_changelog_generate(args: argparse.Namespace, root: "_Path") -> int:  # 
 
 
 # ---------------------------------------------------------------------------
+# vendor-response subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_vendor_response_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent vendor-response",
+        description=(
+            "Track and classify the vendor patch/response status for a CVE. "
+            "Queries NVD, CISA KEV, and VulnCheck KEV to produce a 6-state "
+            "classification: patch_available, patch_pending, workaround_only, "
+            "investigating, no_patch_expected, or unknown."
+        ),
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier (e.g. CVE-2024-3094)")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_vendor_response(argv: list[str]) -> int:
+    parser = _build_vendor_response_parser()
+    args = parser.parse_args(argv)
+
+    cve_id: str = args.cve_id.strip()
+    import re as _re
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.track_vendor_response import _render_text, _run_tracking
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: failed to import track_vendor_response: {exc}", file=__import__("sys").stderr)
+        return 1
+
+    result = _run_tracking(cve_id)
+
+    if args.output == "json":
+        import json as _json
+
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    print(_render_text(result))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # blast-radius subcommand
 # ---------------------------------------------------------------------------
 
@@ -2268,6 +2322,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "vendor-response":
+        idx = argv.index("vendor-response")
+        sys.exit(_run_vendor_response(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
