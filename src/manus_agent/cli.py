@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-freshness",
     "changelog",
     "blast-radius",
 }
@@ -1525,6 +1526,139 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
 
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# poc-freshness subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_freshness_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-freshness",
+        description=(
+            "Measure how recently PoC activity occurred for a CVE.\n"
+            "Checks GitHub repos, Exploit-DB entries, and EPSS score to\n"
+            "produce a composite freshness score (0\u2013100).\n\n"
+            "A high freshness score means attacker interest is ongoing."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _freshness_bar(score: float, width: int = 20) -> str:
+    """Return a Unicode bar chart for a 0\u2013100 score."""
+    filled = round(score / 100 * width)
+    return "\u2588" * filled + "\u2591" * (width - filled)
+
+
+def _freshness_emoji(label: str) -> str:
+    """Return an emoji for the freshness label."""
+    return {
+        "hot": "\U0001f525",
+        "fresh": "\u26a1",
+        "moderate": "\U0001f7e1",
+        "stale": "\U0001f4a4",
+    }.get(label, "\u2753")
+
+
+def _render_poc_freshness_text(result: dict) -> str:
+    """Render poc-freshness result as human-readable text."""
+    lines: list[str] = []
+    cve_id = result.get("cve_id", "?")
+    score = result.get("freshness_score", 0)
+    label = result.get("freshness_label", "unknown")
+    emoji = _freshness_emoji(label)
+
+    if result.get("error"):
+        lines.append(f"Error: {result['error']}")
+        return "\n".join(lines)
+
+    lines.append(f"PoC Freshness: {cve_id}")
+    lines.append(f"  Score : {score}/100 {_freshness_bar(score)} {emoji} {label.upper()}")
+    lines.append("")
+
+    signals = result.get("signals", {})
+
+    # GitHub signal
+    gh = signals.get("github", {})
+    if gh.get("error"):
+        lines.append(f"  GitHub        : error \u2014 {gh['error']}")
+    else:
+        repos = gh.get("repos_found", 0)
+        stars = gh.get("total_stars", 0)
+        forks = gh.get("total_forks", 0)
+        push_days = gh.get("most_recent_push_days_ago")
+        push_str = f"{push_days:.0f}d ago" if push_days is not None else "\u2014"
+        lines.append(f"  GitHub        : {repos} repo(s), {stars} \u2605, {forks} forks, last push {push_str}")
+        for repo in (gh.get("top_repos") or [])[:3]:
+            name = repo.get("full_name", "")
+            url = repo.get("url", "")
+            r_stars = repo.get("stars", 0)
+            lines.append(f"                  \u2514 {name} ({r_stars}\u2605) {url}")
+
+    # Exploit-DB signal
+    edb = signals.get("exploitdb", {})
+    if edb.get("error"):
+        lines.append(f"  Exploit-DB    : error \u2014 {edb['error']}")
+    else:
+        count = edb.get("entries_found", 0)
+        recent_date = edb.get("most_recent_date") or "\u2014"
+        lines.append(f"  Exploit-DB    : {count} entries, most recent {recent_date}")
+        for entry in (edb.get("entries") or [])[:3]:
+            title = entry.get("title", "")
+            url = entry.get("url", "")
+            lines.append(f"                  \u2514 {title} {url}")
+
+    # EPSS signal
+    ep = signals.get("epss", {})
+    if ep.get("error"):
+        lines.append(f"  EPSS          : error \u2014 {ep['error']}")
+    else:
+        epss_score = ep.get("epss_score")
+        percentile = ep.get("epss_percentile")
+        if epss_score is not None:
+            pct_str = f" (p{percentile * 100:.0f})" if percentile is not None else ""
+            lines.append(f"  EPSS          : {epss_score:.4f}{pct_str}")
+        else:
+            lines.append("  EPSS          : no data")
+
+    return "\n".join(lines)
+
+
+def _run_poc_freshness(argv: list[str]) -> int:
+    import json as _json
+    import re as _re
+
+    parser = _build_poc_freshness_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.get_poc_freshness import check_poc_freshness
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = check_poc_freshness(cve_id)
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    print(_render_poc_freshness_text(result))
     return 0
 
 
@@ -2260,6 +2394,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-freshness":
+        idx = argv.index("poc-freshness")
+        sys.exit(_run_poc_freshness(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
