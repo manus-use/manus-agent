@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "version-range",
 }
 
 
@@ -1935,6 +1936,168 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# version-range subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_version_range_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent version-range",
+        description=(
+            "Resolve affected version ranges for a CVE.\n"
+            "Walks NVD CPE configurations and cross-references OSV.dev\n"
+            "ecosystem-specific advisories (PyPI, npm, Maven, Go, etc.)\n"
+            "to produce structured vulnerable semver ranges, a list of\n"
+            "affected releases, and the first patched release."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--ecosystem",
+        choices=["auto", "pypi", "npm", "maven", "go", "crates.io", "rubygems", "nuget", "packagist"],
+        default="auto",
+        help="Force a specific ecosystem (default: auto = all ecosystems)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_version_range(argv: list[str]) -> int:
+    parser = _build_version_range_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip()
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    try:
+        from manus_agent.tools.get_version_range import fetch_version_range
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        data = fetch_version_range(cve_id, ecosystem=args.ecosystem)
+    except Exception as exc:
+        print(f"[error] version-range lookup failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not data.get("found"):
+        msg = data.get("error") or data.get("message") or f"No version range data for {cve_id}"
+        print(f"[error] {msg}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        import json as _json
+
+        print(_json.dumps(data, indent=2))
+        return 0
+
+    # --- Text output ---
+    _render_version_range_text(data)
+    return 0
+
+
+def _render_version_range_text(data: dict) -> None:
+    """Pretty-print version-range results as human-readable text."""
+    cve_id = data.get("cve_id", "")
+    nvd = data.get("nvd", {})
+    osv = data.get("osv", {})
+    summary = data.get("summary", {})
+    eco_filter = data.get("ecosystem_filter", "auto")
+
+    # Header
+    desc = nvd.get("description", "")
+    cvss = nvd.get("cvss_v31_score")
+    severity = nvd.get("cvss_v31_severity", "")
+    print(f"Version ranges for {cve_id}")
+    if eco_filter != "auto":
+        print(f"  Ecosystem filter: {eco_filter}")
+    if cvss is not None:
+        print(f"  CVSS v3.1: {cvss} ({severity})")
+    if desc:
+        # Truncate long descriptions
+        short_desc = desc[:120] + "..." if len(desc) > 120 else desc
+        print(f"  {short_desc}")
+    print()
+
+    # NVD CPE ranges
+    cpe_ranges = nvd.get("cpe_ranges", [])
+    if cpe_ranges:
+        print(f"NVD CPE Configurations ({len(cpe_ranges)} vulnerable range(s)):")
+        for i, r in enumerate(cpe_ranges[:30]):
+            vendor = r.get("vendor", "")
+            product = r.get("product", "")
+            eco = r.get("ecosystem_hint", "")
+            range_disp = r.get("range_display", "")
+            label = f"{vendor}:{product}"
+            if eco and eco != "Unknown":
+                label += f" ({eco})"
+            print(f"  [{i + 1}] {label}")
+            print(f"      Range: {range_disp}")
+        if len(cpe_ranges) > 30:
+            print(f"  ... and {len(cpe_ranges) - 30} more")
+        print()
+
+    # OSV.dev package ranges
+    packages = osv.get("packages", [])
+    if packages:
+        print(f"OSV.dev Packages ({len(packages)} affected package(s)):")
+        for i, pkg in enumerate(packages[:20]):
+            eco = pkg.get("ecosystem", "")
+            name = pkg.get("package", "")
+            fp = pkg.get("first_patched", "")
+            ver_count = pkg.get("affected_version_count", 0)
+            range_strs = pkg.get("range_strings", [])
+
+            print(f"  [{i + 1}] {eco}/{name}")
+            if range_strs:
+                for rs in range_strs:
+                    print(f"      Range: {rs}")
+            if fp:
+                print(f"      First patched: {fp}")
+            if ver_count:
+                print(f"      Affected versions: {ver_count}")
+                versions_sample = pkg.get("affected_versions", [])
+                if versions_sample:
+                    sample_str = ", ".join(versions_sample[:10])
+                    if ver_count > 10:
+                        sample_str += f" ... (+{ver_count - 10} more)"
+                    print(f"      Versions: {sample_str}")
+        if len(packages) > 20:
+            print(f"  ... and {len(packages) - 20} more")
+        print()
+
+    # Summary
+    ecosystems = summary.get("affected_ecosystems", [])
+    first_patched = summary.get("first_patched_versions", {})
+    total_versions = summary.get("total_affected_version_count", 0)
+
+    if ecosystems or first_patched or total_versions:
+        print("Summary:")
+        if ecosystems:
+            print(f"  Affected ecosystems: {', '.join(ecosystems)}")
+        if total_versions:
+            print(f"  Total affected versions: {total_versions}")
+        if first_patched:
+            print("  First patched versions:")
+            for key, ver in sorted(first_patched.items()):
+                print(f"    {key} → {ver}")
+
+    # Errors/warnings
+    errors = data.get("errors", [])
+    if errors:
+        print()
+        for err in errors:
+            print(f"  ⚠ {err}")
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2431,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "version-range":
+        idx = argv.index("version-range")
+        sys.exit(_run_version_range(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
