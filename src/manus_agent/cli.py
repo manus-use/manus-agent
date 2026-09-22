@@ -1057,6 +1057,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "vendor-response",
 }
 
 
@@ -1802,6 +1803,120 @@ def _build_blast_radius_parser() -> argparse.ArgumentParser:
     return p
 
 
+# ---------------------------------------------------------------------------
+# vendor-response subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_vendor_response_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent vendor-response",
+        description=(
+            "Track and classify vendor patch/response status for a CVE.\n"
+            "Queries NVD references, CISA KEV, and VulnCheck KEV to produce\n"
+            "a 6-state classification: patch_available, patch_backported,\n"
+            "wont_fix, investigating, no_patch, or unknown.\n"
+            "Confidence is rated high / moderate / low.\n"
+            "Set VULNCHECK_API_KEY for VulnCheck KEV enrichment."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_vendor_response(argv: list[str]) -> int:
+    import json as _json
+    import re as _re
+
+    parser = _build_vendor_response_parser()
+    args = parser.parse_args(argv)
+
+    cve_id: str = args.cve_id.strip().upper()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.track_vendor_response import (
+            _classify,
+            _fetch_cisa_kev,
+            _fetch_nvd_references,
+            _fetch_vulncheck_kev,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: failed to import track_vendor_response: {exc}", file=sys.stderr)
+        return 1
+
+    import os as _os
+
+    api_key = _os.environ.get("VULNCHECK_API_KEY", "").strip()
+
+    # Gather signals — each source fails gracefully.
+    references = _fetch_nvd_references(cve_id)
+    cisa_kev = _fetch_cisa_kev(cve_id)
+    vulncheck_kev = _fetch_vulncheck_kev(cve_id, api_key)
+
+    nvd_status = "analyzed" if references else "unknown"
+    state, confidence, evidence = _classify(references, cisa_kev, vulncheck_kev, nvd_status)
+
+    # Map confidence float to label.
+    if confidence >= 0.75:
+        confidence_label = "high"
+    elif confidence >= 0.5:
+        confidence_label = "moderate"
+    else:
+        confidence_label = "low"
+
+    payload = {
+        "cve_id": cve_id,
+        "classification": state,
+        "confidence": confidence,
+        "confidence_label": confidence_label,
+        "evidence": evidence,
+        "signals": {
+            "nvd_references_found": len(references),
+            "cisa_kev_hit": bool(cisa_kev),
+            "vulncheck_kev_hit": bool(vulncheck_kev),
+            "vulncheck_api_key_present": bool(api_key),
+        },
+    }
+
+    if args.output == "json":
+        print(_json.dumps(payload, indent=2))
+        return 0
+
+    # Text output.
+    print()
+    print(f"Vendor Response — {cve_id}")
+    print("=" * 60)
+    print(f"  Classification : {state}")
+    print(f"  Confidence     : {confidence_label} ({confidence})")
+    print()
+
+    if evidence:
+        print("Evidence:")
+        for i, ev in enumerate(evidence, 1):
+            print(f"  {i}. {ev}")
+        print()
+
+    sigs = payload["signals"]
+    print("Signals:")
+    print(f"  NVD references found    : {sigs['nvd_references_found']}")
+    print(f"  CISA KEV hit            : {'Yes' if sigs['cisa_kev_hit'] else 'No'}")
+    print(f"  VulnCheck KEV hit       : {'Yes' if sigs['vulncheck_kev_hit'] else 'No'}")
+    print(f"  VulnCheck API key set   : {'Yes' if sigs['vulncheck_api_key_present'] else 'No'}")
+    print()
+
+    return 0
+
+
 def _run_blast_radius(argv: list[str]) -> int:
     import json as _json
 
@@ -2268,6 +2383,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "vendor-response":
+        idx = argv.index("vendor-response")
+        sys.exit(_run_vendor_response(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
