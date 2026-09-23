@@ -95,26 +95,26 @@ def _make_5xx_response(status: int = 503) -> MagicMock:
 
 
 def test_retryable_statuses_includes_429():
-    from manus_agent.tools.get_vulncheck_data import _VC_RETRYABLE_STATUSES
+    from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _VC_RETRYABLE_STATUSES
 
     assert 429 in _VC_RETRYABLE_STATUSES
 
 
 def test_retryable_statuses_includes_5xx():
-    from manus_agent.tools.get_vulncheck_data import _VC_RETRYABLE_STATUSES
+    from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _VC_RETRYABLE_STATUSES
 
     for code in (500, 502, 503, 504):
         assert code in _VC_RETRYABLE_STATUSES
 
 
 def test_retryable_statuses_excludes_401():
-    from manus_agent.tools.get_vulncheck_data import _VC_RETRYABLE_STATUSES
+    from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _VC_RETRYABLE_STATUSES
 
     assert 401 not in _VC_RETRYABLE_STATUSES
 
 
 def test_retryable_statuses_excludes_404():
-    from manus_agent.tools.get_vulncheck_data import _VC_RETRYABLE_STATUSES
+    from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _VC_RETRYABLE_STATUSES
 
     assert 404 not in _VC_RETRYABLE_STATUSES
 
@@ -166,8 +166,8 @@ def test_retry_base_delay_default_is_1():
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_success_first_attempt_no_sleep(mock_sleep, mock_get, monkeypatch):
     """A 200 response on the first attempt must not sleep."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -186,7 +186,7 @@ def test_success_first_attempt_no_sleep(mock_sleep, mock_get, monkeypatch):
     mock_get.assert_called_once()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_success_first_attempt_returns_response(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
     resp = _make_response(200, {"data": [{"id": "x"}]})
@@ -208,8 +208,8 @@ def test_success_first_attempt_returns_response(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_retries_on_429_then_succeeds(mock_sleep, mock_get, monkeypatch):
     """One 429 followed by a 200 should result in 2 total attempts."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -229,8 +229,8 @@ def test_retries_on_429_then_succeeds(mock_sleep, mock_get, monkeypatch):
     mock_sleep.assert_called_once()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_retries_on_429_twice_then_succeeds(mock_sleep, mock_get, monkeypatch):
     """Two 429s followed by a 200 should result in 3 total attempts."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -251,8 +251,8 @@ def test_retries_on_429_twice_then_succeeds(mock_sleep, mock_get, monkeypatch):
     assert mock_sleep.call_count == 2
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_exhausts_retries_on_persistent_429(mock_sleep, mock_get, monkeypatch):
     """Persistent 429s should exhaust retries and raise."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -273,8 +273,8 @@ def test_exhausts_retries_on_persistent_429(mock_sleep, mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_retries_on_503_then_succeeds(mock_sleep, mock_get, monkeypatch):
     """503 Service Unavailable should be retried."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -292,8 +292,8 @@ def test_retries_on_503_then_succeeds(mock_sleep, mock_get, monkeypatch):
     assert mock_get.call_count == 2
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_retries_on_500(mock_sleep, mock_get, monkeypatch):
     """500 Internal Server Error should also be retried."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -310,8 +310,8 @@ def test_retries_on_500(mock_sleep, mock_get, monkeypatch):
     assert resp.status_code == 200
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_all_5xx_status_codes_are_retried(mock_sleep, mock_get, monkeypatch):
     """All five retryable 5xx codes should trigger retry."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -336,8 +336,8 @@ def test_all_5xx_status_codes_are_retried(mock_sleep, mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_401_not_retried(mock_sleep, mock_get, monkeypatch):
     """401 Unauthorized is non-retryable — should raise immediately."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -354,8 +354,8 @@ def test_401_not_retried(mock_sleep, mock_get, monkeypatch):
     mock_sleep.assert_not_called()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_403_not_retried(mock_sleep, mock_get, monkeypatch):
     """403 Forbidden is non-retryable — should raise immediately."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -372,8 +372,8 @@ def test_403_not_retried(mock_sleep, mock_get, monkeypatch):
     mock_sleep.assert_not_called()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_404_not_retried(mock_sleep, mock_get, monkeypatch):
     """404 Not Found is non-retryable — should raise immediately."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -395,8 +395,8 @@ def test_404_not_retried(mock_sleep, mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_connection_error_retried(mock_sleep, mock_get, monkeypatch):
     """Connection errors (no HTTP response) should be retried."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -414,8 +414,8 @@ def test_connection_error_retried(mock_sleep, mock_get, monkeypatch):
     assert mock_get.call_count == 2
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_timeout_retried(mock_sleep, mock_get, monkeypatch):
     """Timeout errors should be retried."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -433,8 +433,8 @@ def test_timeout_retried(mock_sleep, mock_get, monkeypatch):
     assert mock_get.call_count == 2
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_persistent_connection_error_raises(mock_sleep, mock_get, monkeypatch):
     """Persistent connection errors should exhaust retries and raise."""
     monkeypatch.setenv("VULNCHECK_RETRY_BASE_DELAY", "0")
@@ -455,8 +455,8 @@ def test_persistent_connection_error_raises(mock_sleep, mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 @patch("manus_agent.tools.get_vulncheck_data._VC_MAX_RETRIES", 3)
 def test_backoff_delay_doubles_each_retry(mock_sleep, mock_get):
     """Sleep delays must double each attempt: base, 2*base, 4*base…"""
@@ -483,8 +483,8 @@ def test_backoff_delay_doubles_each_retry(mock_sleep, mock_get):
     assert sleep_calls[1] == pytest.approx(base * 2)  # attempt 2 → sleep base * 2^1
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_no_sleep_after_final_retry(mock_sleep, mock_get):
     """No sleep should happen after the last failed attempt."""
     import manus_agent.tools.get_vulncheck_data as vc_mod
@@ -508,8 +508,8 @@ def test_no_sleep_after_final_retry(mock_sleep, mock_get):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_tool_retries_kev_on_429(mock_sleep, mock_get, monkeypatch):
     """get_vulncheck_data should retry KEV 429 transparently."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
@@ -534,8 +534,8 @@ def test_tool_retries_kev_on_429(mock_sleep, mock_get, monkeypatch):
     assert mock_get.call_count == 3
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_tool_retries_nvd2_on_503(mock_sleep, mock_get, monkeypatch):
     """get_vulncheck_data should retry NVD2 503 transparently."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
@@ -558,8 +558,8 @@ def test_tool_retries_nvd2_on_503(mock_sleep, mock_get, monkeypatch):
     assert payload["error"] is None
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_tool_records_error_after_kev_exhausted(mock_sleep, mock_get, monkeypatch):
     """When KEV retries are exhausted the tool records an error (does not raise)."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
@@ -590,8 +590,8 @@ def test_tool_records_error_after_kev_exhausted(mock_sleep, mock_get, monkeypatc
     assert payload["kev"]["in_kev"] is False  # default fallback
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_tool_no_retry_on_401(mock_sleep, mock_get, monkeypatch):
     """401 must not be retried — wrong API key should surface immediately."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "bad-key")
@@ -620,8 +620,8 @@ def test_tool_no_retry_on_401(mock_sleep, mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_max_retries_module_var_one(mock_sleep, mock_get):
     """_VC_MAX_RETRIES=1 should mean no retries (single attempt)."""
     import manus_agent.tools.get_vulncheck_data as vc_mod
@@ -640,8 +640,8 @@ def test_max_retries_module_var_one(mock_sleep, mock_get):
     mock_sleep.assert_not_called()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
-@patch("manus_agent.tools.get_vulncheck_data.time.sleep")
+@patch("manus_agent.utils.http_retry.requests.get")
+@patch("manus_agent.utils.http_retry.time.sleep")
 def test_retry_base_delay_zero_sleeps_zero(mock_sleep, mock_get):
     """_VC_RETRY_BASE_DELAY=0 should sleep 0 seconds (instant retry)."""
     import manus_agent.tools.get_vulncheck_data as vc_mod

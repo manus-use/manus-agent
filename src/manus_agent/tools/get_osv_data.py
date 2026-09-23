@@ -27,13 +27,13 @@ Public API, no key required:
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.http_retry import http_get_with_retry
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration (mirrors get_vulncheck_data conventions)
@@ -45,9 +45,6 @@ _OSV_MAX_RETRIES: int = int(os.environ.get("OSV_MAX_RETRIES", "3"))
 # Base delay between retries in seconds (doubles each attempt: 1s, 2s…).
 # Override with OSV_RETRY_BASE_DELAY env var (set to "0" in tests).
 _OSV_RETRY_BASE_DELAY: float = float(os.environ.get("OSV_RETRY_BASE_DELAY", "1.0"))
-
-# HTTP status codes that are retryable (rate-limit or transient server error).
-_OSV_RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 _OSV_VULN_URL = "https://api.osv.dev/v1/vulns/{osv_id}"
 _OSV_TIMEOUT = 15
@@ -89,28 +86,24 @@ TOOL_SPEC = {
 def _osv_get_with_retry(osv_id: str) -> requests.Response:
     """GET a single OSV record with exponential back-off on transient errors.
 
-    Retries on 429/5xx and on connection/timeout errors. Non-retryable 4xx
-    (e.g. 404 for an unknown id) are returned to the caller as-is so they can
-    be handled without raising.
+    Delegates to :func:`manus_agent.utils.http_retry.http_get_with_retry`
+    with OSV-specific defaults.  Non-retryable 4xx (e.g. 404 for an unknown
+    id) are returned to the caller as-is so they can be handled without
+    raising.
+
+    Note: ``_OSV_MAX_RETRIES`` represents *total attempts* (legacy convention),
+    so we subtract 1 for the shared helper's ``max_retries`` parameter which
+    counts retries *after* the first attempt.
     """
     url = _OSV_VULN_URL.format(osv_id=osv_id)
-    last_exc: Exception | None = None
-    for attempt in range(_OSV_MAX_RETRIES):
-        try:
-            resp = requests.get(url, timeout=_OSV_TIMEOUT, headers={"Accept": "application/json"})
-            if resp.status_code in _OSV_RETRYABLE_STATUSES and attempt < _OSV_MAX_RETRIES - 1:
-                time.sleep(_OSV_RETRY_BASE_DELAY * (2**attempt))
-                continue
-            return resp
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-            last_exc = exc
-            if attempt < _OSV_MAX_RETRIES - 1:
-                time.sleep(_OSV_RETRY_BASE_DELAY * (2**attempt))
-                continue
-            raise
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError("OSV request failed without a specific exception")
+    return http_get_with_retry(
+        url,
+        headers={"Accept": "application/json"},
+        timeout=_OSV_TIMEOUT,
+        max_retries=max(_OSV_MAX_RETRIES - 1, 0),
+        base_delay=_OSV_RETRY_BASE_DELAY,
+        raise_for_status=False,  # let caller handle 404s
+    )
 
 
 # ---------------------------------------------------------------------------

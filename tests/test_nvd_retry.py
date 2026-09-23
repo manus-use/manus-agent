@@ -82,7 +82,6 @@ class TestNvdGetWithRetry:
 
         monkeypatch.setattr(m, "_NVD_MAX_RETRIES", 3)
         monkeypatch.setattr(m, "_NVD_RETRY_BASE_DELAY", 0.0)
-        monkeypatch.setattr(m, "_NVD_RETRYABLE_STATUS", {429, 500, 502, 503, 504})
 
     def _retry_fn(self):
         from manus_agent.tools.get_nvd_data import _nvd_get_with_retry
@@ -93,7 +92,7 @@ class TestNvdGetWithRetry:
 
     def test_success_on_first_attempt(self, monkeypatch):
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good) as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good) as m:
             resp = self._retry_fn()("https://example.com")
         assert resp is good
         assert m.call_count == 1
@@ -101,7 +100,7 @@ class TestNvdGetWithRetry:
     def test_api_key_forwarded_as_header(self, monkeypatch):
         monkeypatch.setenv("NVD_API_KEY", "secret-key")
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good) as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good) as m:
             self._retry_fn()("https://example.com")
         _, kwargs = m.call_args
         assert kwargs["headers"].get("apiKey") == "secret-key"
@@ -109,7 +108,7 @@ class TestNvdGetWithRetry:
     def test_no_api_key_sends_empty_headers(self, monkeypatch):
         monkeypatch.delenv("NVD_API_KEY", raising=False)
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good) as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good) as m:
             self._retry_fn()("https://example.com")
         _, kwargs = m.call_args
         assert kwargs["headers"] == {}
@@ -119,8 +118,8 @@ class TestNvdGetWithRetry:
     def test_retries_on_429_then_succeeds(self, monkeypatch):
         rate_limited = _mock_response(429)
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[rate_limited, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[rate_limited, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = self._retry_fn()("https://example.com")
         assert m.call_count == 2
         assert resp is good
@@ -128,8 +127,8 @@ class TestNvdGetWithRetry:
     def test_retries_on_500_then_succeeds(self, monkeypatch):
         err500 = _mock_response(500)
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[err500, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[err500, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = self._retry_fn()("https://example.com")
         assert m.call_count == 2
         assert resp is good
@@ -137,16 +136,16 @@ class TestNvdGetWithRetry:
     def test_retries_on_503_then_succeeds(self, monkeypatch):
         err503 = _mock_response(503)
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[err503, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[err503, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 self._retry_fn()("https://example.com")
         assert m.call_count == 2
 
     def test_all_three_retries_then_success_on_4th(self, monkeypatch):
         err = _mock_response(429)
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[err, err, err, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[err, err, err, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = self._retry_fn()("https://example.com")
         assert m.call_count == 4  # 1 initial + 3 retries
         assert resp is good
@@ -156,8 +155,8 @@ class TestNvdGetWithRetry:
 
         monkeypatch.setattr(m_mod, "_NVD_MAX_RETRIES", 2)
         err = _mock_response(429)
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=err):
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=err):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 with pytest.raises(requests.exceptions.HTTPError):
                     self._retry_fn()("https://example.com")
 
@@ -166,10 +165,10 @@ class TestNvdGetWithRetry:
     def test_connection_error_retried_then_succeeds(self, monkeypatch):
         good = _mock_response(200, _good_nvd_response())
         with mock.patch(
-            "manus_agent.tools.get_nvd_data.requests.get",
+            "manus_agent.utils.http_retry.requests.get",
             side_effect=[requests.exceptions.ConnectionError("refused"), good],
         ) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = self._retry_fn()("https://example.com")
         assert m.call_count == 2
         assert resp is good
@@ -177,9 +176,9 @@ class TestNvdGetWithRetry:
     def test_timeout_error_retried_then_succeeds(self, monkeypatch):
         good = _mock_response(200, _good_nvd_response())
         with mock.patch(
-            "manus_agent.tools.get_nvd_data.requests.get", side_effect=[requests.exceptions.Timeout("timed out"), good]
+            "manus_agent.utils.http_retry.requests.get", side_effect=[requests.exceptions.Timeout("timed out"), good]
         ) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 self._retry_fn()("https://example.com")
         assert m.call_count == 2
 
@@ -188,9 +187,9 @@ class TestNvdGetWithRetry:
 
         monkeypatch.setattr(m_mod, "_NVD_MAX_RETRIES", 1)
         with mock.patch(
-            "manus_agent.tools.get_nvd_data.requests.get", side_effect=requests.exceptions.ConnectionError("fail")
+            "manus_agent.utils.http_retry.requests.get", side_effect=requests.exceptions.ConnectionError("fail")
         ):
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 with pytest.raises(requests.exceptions.RequestException):
                     self._retry_fn()("https://example.com")
 
@@ -204,16 +203,16 @@ class TestNvdGetWithRetry:
         err = _mock_response(429)
         good = _mock_response(200, _good_nvd_response())
         sleep_calls = []
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[err, err, err, good]):
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[err, err, err, good]):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep", side_effect=lambda s: sleep_calls.append(s)):
                 self._retry_fn()("https://example.com")
         # attempt 2 delay=2, attempt 3 delay=4, attempt 4 delay=8
         assert sleep_calls == [2.0, 4.0, 8.0]
 
     def test_no_sleep_on_first_attempt(self, monkeypatch):
         good = _mock_response(200, _good_nvd_response())
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good):
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep") as sleep_mock:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good):
+            with mock.patch("manus_agent.utils.http_retry.time.sleep") as sleep_mock:
                 self._retry_fn()("https://example.com")
         sleep_mock.assert_not_called()
 
@@ -223,7 +222,7 @@ class TestNvdGetWithRetry:
         err404 = _mock_response(404)
         # Provide a response object so the retry logic can inspect status_code
         err404.raise_for_status.side_effect = requests.exceptions.HTTPError("404", response=err404)
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=err404) as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=err404) as m:
             with pytest.raises(requests.exceptions.HTTPError):
                 self._retry_fn()("https://example.com")
         assert m.call_count == 1  # no retry for 404
@@ -231,7 +230,7 @@ class TestNvdGetWithRetry:
     def test_400_not_retried(self, monkeypatch):
         err400 = _mock_response(400)
         err400.raise_for_status.side_effect = requests.exceptions.HTTPError("400", response=err400)
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=err400) as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=err400) as m:
             with pytest.raises(requests.exceptions.HTTPError):
                 self._retry_fn()("https://example.com")
         assert m.call_count == 1
@@ -259,7 +258,7 @@ class TestGetNvdDataTool:
         good = _mock_response(200, _good_nvd_response("CVE-2024-9999"))
         from manus_agent.tools.get_nvd_data import get_nvd_data
 
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good):
             result = get_nvd_data(self._tool("CVE-2024-9999"))
         assert result["status"] == "success"
 
@@ -268,8 +267,8 @@ class TestGetNvdDataTool:
         good = _mock_response(200, _good_nvd_response())
         from manus_agent.tools.get_nvd_data import get_nvd_data
 
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[rate_limited, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[rate_limited, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 result = get_nvd_data(self._tool("CVE-2024-1234"))
         assert result["status"] == "success"
         assert m.call_count == 2
@@ -282,8 +281,8 @@ class TestGetNvdDataTool:
         from manus_agent.tools.get_nvd_data import get_nvd_data
 
         try:
-            with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=err429):
-                with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+            with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=err429):
+                with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                     result = get_nvd_data(self._tool("CVE-2024-1234"))
             assert result["status"] == "error"
         finally:
@@ -292,7 +291,7 @@ class TestGetNvdDataTool:
     def test_invalid_cve_id_no_retry(self):
         from manus_agent.tools.get_nvd_data import get_nvd_data
 
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get") as m:
+        with mock.patch("manus_agent.utils.http_retry.requests.get") as m:
             result = get_nvd_data(self._tool("not-a-cve"))
         assert result["status"] == "error"
         m.assert_not_called()
@@ -323,8 +322,8 @@ class TestObtainCvesNvdRetry:
         rate_limited = _mock_response(429)
         good = _mock_response(200, self._nvd_page([{"cve": {"id": "CVE-2024-0001"}}], 1))
 
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", side_effect=[rate_limited, good]) as m:
-            with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", side_effect=[rate_limited, good]) as m:
+            with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                 cves = _get_all_cves_from_nvd("2024-01-01T00:00:00.000Z", "2024-01-31T00:00:00.000Z")
         assert len(cves) == 1
         assert m.call_count == 2
@@ -335,7 +334,7 @@ class TestObtainCvesNvdRetry:
         cve_list = [{"cve": {"id": f"CVE-2024-{i:04d}"}} for i in range(5)]
         good = _mock_response(200, self._nvd_page(cve_list, 5))
 
-        with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=good):
+        with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=good):
             cves = _get_all_cves_from_nvd("2024-01-01T00:00:00.000Z", "2024-01-31T00:00:00.000Z")
         assert len(cves) == 5
 
@@ -347,8 +346,8 @@ class TestObtainCvesNvdRetry:
 
         err429 = _mock_response(429)
         try:
-            with mock.patch("manus_agent.tools.get_nvd_data.requests.get", return_value=err429):
-                with mock.patch("manus_agent.tools.get_nvd_data.time.sleep"):
+            with mock.patch("manus_agent.utils.http_retry.requests.get", return_value=err429):
+                with mock.patch("manus_agent.utils.http_retry.time.sleep"):
                     with pytest.raises(requests.exceptions.HTTPError):
                         _get_all_cves_from_nvd("2024-01-01T00:00:00.000Z", "2024-01-31T00:00:00.000Z")
         finally:
@@ -362,28 +361,28 @@ class TestObtainCvesNvdRetry:
 
 class TestRetryableStatusSet:
     def test_429_in_retryable_set(self):
-        from manus_agent.tools.get_nvd_data import _NVD_RETRYABLE_STATUS
+        from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _NVD_RETRYABLE_STATUS
 
         assert 429 in _NVD_RETRYABLE_STATUS
 
     def test_500_in_retryable_set(self):
-        from manus_agent.tools.get_nvd_data import _NVD_RETRYABLE_STATUS
+        from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _NVD_RETRYABLE_STATUS
 
         assert 500 in _NVD_RETRYABLE_STATUS
 
     def test_200_not_in_retryable_set(self):
-        from manus_agent.tools.get_nvd_data import _NVD_RETRYABLE_STATUS
+        from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _NVD_RETRYABLE_STATUS
 
         assert 200 not in _NVD_RETRYABLE_STATUS
 
     def test_404_not_in_retryable_set(self):
-        from manus_agent.tools.get_nvd_data import _NVD_RETRYABLE_STATUS
+        from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _NVD_RETRYABLE_STATUS
 
         assert 404 not in _NVD_RETRYABLE_STATUS
 
     @pytest.mark.parametrize("code", [429, 500, 502, 503, 504])
     def test_all_expected_codes_in_retryable_set(self, code):
-        from manus_agent.tools.get_nvd_data import _NVD_RETRYABLE_STATUS
+        from manus_agent.utils.http_retry import DEFAULT_RETRYABLE_STATUSES as _NVD_RETRYABLE_STATUS
 
         assert code in _NVD_RETRYABLE_STATUS
 

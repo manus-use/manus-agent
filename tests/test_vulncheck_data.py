@@ -162,7 +162,7 @@ def test_missing_cve_id_returns_error(monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_hit_in_kev_true(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -177,7 +177,7 @@ def test_kev_hit_in_kev_true(mock_get, monkeypatch):
     assert payload["kev"]["in_kev"] is True
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_hit_sources_populated(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -192,7 +192,7 @@ def test_kev_hit_sources_populated(mock_get, monkeypatch):
     assert "FBI Flash" in payload["kev"]["sources"]
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_hit_date_added_parsed(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -206,7 +206,7 @@ def test_kev_hit_date_added_parsed(mock_get, monkeypatch):
     assert payload["kev"]["date_added"] == "2024-03-29"
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_hit_no_error_field(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -225,7 +225,7 @@ def test_kev_hit_no_error_field(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_ransomware_flag_parsed_true(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     kev_payload = {
@@ -249,7 +249,7 @@ def test_ransomware_flag_parsed_true(mock_get, monkeypatch):
     assert payload["kev"]["ransomware_use"] is True
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_ransomware_flag_parsed_false(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -263,7 +263,7 @@ def test_ransomware_flag_parsed_false(mock_get, monkeypatch):
     assert payload["kev"]["ransomware_use"] is False
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_ransomware_known_campaign_use_field(mock_get, monkeypatch):
     """knownRansomwareCampaignUse field should set ransomware_use=True."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
@@ -292,7 +292,7 @@ def test_ransomware_known_campaign_use_field(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_no_kev_match_in_kev_false(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -306,7 +306,7 @@ def test_no_kev_match_in_kev_false(mock_get, monkeypatch):
     assert payload["kev"]["in_kev"] is False
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_no_kev_match_sources_empty(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -325,7 +325,7 @@ def test_no_kev_match_sources_empty(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_nvd2_cpe_matches_extracted(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -341,7 +341,7 @@ def test_nvd2_cpe_matches_extracted(mock_get, monkeypatch):
     assert "cpe:2.3:a:tukaani:xz_utils:5.6.0:*:*:*:*:*:*:*" in cpe_matches
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_nvd2_cvss_score_extracted(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -356,7 +356,7 @@ def test_nvd2_cvss_score_extracted(mock_get, monkeypatch):
     assert payload["nvd2"]["cvss_v3_severity"] == "CRITICAL"
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_nvd2_description_extracted(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -370,7 +370,7 @@ def test_nvd2_description_extracted(mock_get, monkeypatch):
     assert "xz" in payload["nvd2"]["description"].lower()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_nvd2_empty_data_returns_none_fields(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -390,7 +390,7 @@ def test_nvd2_empty_data_returns_none_fields(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_network_failure_sets_error(mock_get, monkeypatch):
     import requests as req_lib
 
@@ -404,7 +404,7 @@ def test_kev_network_failure_sets_error(mock_get, monkeypatch):
     assert "KEV" in payload["error"] or "request" in payload["error"].lower()
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_failure_still_tries_nvd2(mock_get, monkeypatch):
     """Even if KEV fails (after all retries), NVD2 should still be attempted."""
     import requests as req_lib
@@ -434,7 +434,7 @@ def test_kev_failure_still_tries_nvd2(mock_get, monkeypatch):
     assert len(payload["nvd2"]["cpe_matches"]) > 0
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_both_endpoints_fail_error_combined(mock_get, monkeypatch):
     """Both failures should produce a combined error string."""
     import requests as req_lib
@@ -449,7 +449,7 @@ def test_both_endpoints_fail_error_combined(mock_get, monkeypatch):
     assert payload["error"] is not None
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_http_401_error_propagated(mock_get, monkeypatch):
     import requests as req_lib
 
@@ -468,7 +468,7 @@ def test_http_401_error_propagated(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_cve_id_uppercased(mock_get, monkeypatch):
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
     mock_get.side_effect = [
@@ -487,7 +487,7 @@ def test_cve_id_uppercased(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_kev_reported_by_field_used_as_sources(mock_get, monkeypatch):
     """reportedBy (alternative field) should populate kev.sources."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")
@@ -515,7 +515,7 @@ def test_kev_reported_by_field_used_as_sources(mock_get, monkeypatch):
 # ===========================================================================
 
 
-@patch("manus_agent.tools.get_vulncheck_data.requests.get")
+@patch("manus_agent.utils.http_retry.requests.get")
 def test_nvd2_cvss_v30_fallback(mock_get, monkeypatch):
     """Should parse cvssMetricV30 when cvssMetricV31 is absent."""
     monkeypatch.setenv("VULNCHECK_API_KEY", "test-key")

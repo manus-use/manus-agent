@@ -16,13 +16,13 @@ gracefully.
 from __future__ import annotations
 
 import os
-import time
 from typing import Any
 
 import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.http_retry import http_get_with_retry
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration
@@ -34,9 +34,6 @@ _VC_MAX_RETRIES: int = int(os.environ.get("VULNCHECK_MAX_RETRIES", "3"))
 # Base delay between retries in seconds (doubles each attempt: 1s, 2s, 4s…).
 # Override with VULNCHECK_RETRY_BASE_DELAY env var (set to "0" in tests).
 _VC_RETRY_BASE_DELAY: float = float(os.environ.get("VULNCHECK_RETRY_BASE_DELAY", "1.0"))
-
-# HTTP status codes that are retryable (rate-limit or transient server error).
-_VC_RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 TOOL_SPEC = {
     "name": "get_vulncheck_data",
@@ -84,49 +81,21 @@ def _vc_get_with_retry(
 ) -> requests.Response:
     """GET *url* with exponential back-off retry on retryable status codes.
 
-    Retries on HTTP 429 (rate-limit) and 5xx transient errors up to
-    ``_VC_MAX_RETRIES`` total attempts.  Non-retryable 4xx responses
-    (e.g. 401, 403, 404) are raised immediately so callers can surface
-    authentication errors without wasting quota on pointless retries.
+    Delegates to :func:`manus_agent.utils.http_retry.http_get_with_retry`
+    with VulnCheck-specific defaults.
 
-    Back-off schedule (base delay ``_VC_RETRY_BASE_DELAY`` = 1 s by default):
-      attempt 2 →  1 s
-      attempt 3 →  2 s
-      attempt 4 →  4 s
-
-    Returns the final :class:`requests.Response` on success.
-    Raises :class:`requests.exceptions.RequestException` on permanent failure.
+    Note: ``_VC_MAX_RETRIES`` represents *total attempts* (legacy convention),
+    so we subtract 1 for the shared helper's ``max_retries`` parameter which
+    counts retries *after* the first attempt.
     """
-    last_exc: requests.exceptions.RequestException | None = None
-    for attempt in range(1, _VC_MAX_RETRIES + 1):
-        try:
-            response = requests.get(url, headers=headers, params=params, timeout=timeout)
-            if response.status_code in _VC_RETRYABLE_STATUSES:
-                if attempt < _VC_MAX_RETRIES:
-                    sleep_secs = _VC_RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                    time.sleep(sleep_secs)
-                    continue
-                # Final attempt — raise so the caller sees the error.
-                response.raise_for_status()
-            # Non-retryable 4xx (401, 403, 404, …) → raise immediately.
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as exc:
-            # Only retry on network-level errors or retryable HTTP errors.
-            # For HTTP errors, check whether the status is retryable; for
-            # connection/timeout errors (no response), always retry.
-            http_resp = getattr(exc, "response", None)
-            if http_resp is not None and http_resp.status_code not in _VC_RETRYABLE_STATUSES:
-                raise  # Non-retryable HTTP error — propagate immediately.
-            last_exc = exc
-            if attempt < _VC_MAX_RETRIES:
-                sleep_secs = _VC_RETRY_BASE_DELAY * (2 ** (attempt - 1))
-                time.sleep(sleep_secs)
-    # Exhausted all retries.
-    if last_exc is not None:
-        raise last_exc
-    # Should never reach here, but appease mypy.
-    raise requests.exceptions.RequestException("VulnCheck request failed after all retries")
+    return http_get_with_retry(
+        url,
+        headers=headers,
+        params=params,
+        timeout=timeout,
+        max_retries=max(_VC_MAX_RETRIES - 1, 0),
+        base_delay=_VC_RETRY_BASE_DELAY,
+    )
 
 
 def _fetch_kev(cve_id: str, api_key: str) -> dict[str, Any]:
