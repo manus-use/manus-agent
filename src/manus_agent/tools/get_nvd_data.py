@@ -20,13 +20,13 @@ never logged.
 
 import json
 import os
-import time
 from typing import Any
 
 import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.http_retry import http_get_with_retry
 
 TOOL_SPEC = {  # Minor change to force re-evaluation
     "name": "get_nvd_data",
@@ -55,8 +55,6 @@ TOOL_SPEC = {  # Minor change to force re-evaluation
 # ---------------------------------------------------------------------------
 _NVD_MAX_RETRIES = int(os.environ.get("NVD_MAX_RETRIES", "3"))
 _NVD_RETRY_BASE_DELAY = float(os.environ.get("NVD_RETRY_BASE_DELAY", "2"))  # seconds
-# HTTP status codes worth retrying (rate-limit + transient server errors)
-_NVD_RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 
 def _build_nvd_headers() -> dict[str, str]:
@@ -71,48 +69,16 @@ def _build_nvd_headers() -> dict[str, str]:
 def _nvd_get_with_retry(url: str, *, timeout: int = 15) -> requests.Response:
     """GET *url* with exponential back-off retry on 429 / transient errors.
 
-    Raises the underlying :class:`requests.exceptions.RequestException` (or
-    :class:`requests.exceptions.HTTPError`) after all retries are exhausted.
-
-    Back-off schedule (default, NVD_MAX_RETRIES=3):
-      attempt 1 -> immediate
-      attempt 2 -> sleep 2 s
-      attempt 3 -> sleep 4 s
-      attempt 4 -> sleep 8 s
+    Delegates to :func:`manus_agent.utils.http_retry.http_get_with_retry`
+    with NVD-specific defaults (2 s base delay, NVD_API_KEY injection).
     """
-    headers = _build_nvd_headers()
-    last_exc: Exception | None = None
-
-    for attempt in range(_NVD_MAX_RETRIES + 1):
-        if attempt > 0:
-            delay = _NVD_RETRY_BASE_DELAY * (2 ** (attempt - 1))
-            time.sleep(delay)
-        try:
-            response = requests.get(url, headers=headers, timeout=timeout)
-            if response.status_code in _NVD_RETRYABLE_STATUS:
-                # Build a descriptive exception for this retryable status
-                last_exc = requests.exceptions.HTTPError(f"HTTP {response.status_code}", response=response)
-                if attempt < _NVD_MAX_RETRIES:
-                    continue  # retry
-                raise last_exc  # all retries exhausted
-            response.raise_for_status()
-            return response
-        except requests.exceptions.HTTPError as exc:
-            # Non-retryable client errors (4xx other than 429) fail immediately
-            if exc.response is not None and exc.response.status_code not in _NVD_RETRYABLE_STATUS:
-                raise
-            last_exc = exc
-            if attempt < _NVD_MAX_RETRIES:
-                continue
-            raise
-        except requests.exceptions.RequestException as exc:
-            last_exc = exc
-            if attempt < _NVD_MAX_RETRIES:
-                continue
-            # Final attempt failed -- propagate
-            raise
-    # All retries exhausted via a retryable status code path
-    raise last_exc  # type: ignore[misc]
+    return http_get_with_retry(
+        url,
+        headers=_build_nvd_headers(),
+        timeout=timeout,
+        max_retries=_NVD_MAX_RETRIES,
+        base_delay=_NVD_RETRY_BASE_DELAY,
+    )
 
 
 def get_nvd_data(tool: ToolUse, **kwargs: Any) -> ToolResult:

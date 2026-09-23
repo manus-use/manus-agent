@@ -14,6 +14,7 @@ import pytest
 import requests
 
 from manus_agent.tools import get_osv_data as mod
+from manus_agent.utils import http_retry
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ class TestToolSpec:
         assert "OSV" in mod.TOOL_SPEC["description"]
 
     def test_retryable_statuses(self):
-        assert mod._OSV_RETRYABLE_STATUSES == frozenset({429, 500, 502, 503, 504})
+        assert http_retry.DEFAULT_RETRYABLE_STATUSES == frozenset({429, 500, 502, 503, 504})
 
     def test_config_env_defaults(self):
         assert mod._OSV_MAX_RETRIES >= 1
@@ -194,7 +195,7 @@ class TestSummariseRecord:
 class TestRetry:
     def test_success_first_try(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
-        with patch.object(mod.requests, "get", return_value=_make_response(200, {"id": "X"})) as g:
+        with patch("manus_agent.utils.http_retry.requests.get", return_value=_make_response(200, {"id": "X"})) as g:
             resp = mod._osv_get_with_retry("CVE-2021-44228")
         assert resp.status_code == 200
         assert g.call_count == 1
@@ -203,8 +204,8 @@ class TestRetry:
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         monkeypatch.setattr(mod, "_OSV_MAX_RETRIES", 3)
         responses = [_make_response(429), _make_response(200, {"id": "X"})]
-        with patch.object(mod.requests, "get", side_effect=responses) as g:
-            with patch.object(mod.time, "sleep") as slp:
+        with patch("manus_agent.utils.http_retry.requests.get", side_effect=responses) as g:
+            with patch("manus_agent.utils.http_retry.time.sleep") as slp:
                 resp = mod._osv_get_with_retry("CVE-1")
         assert resp.status_code == 200
         assert g.call_count == 2
@@ -214,23 +215,23 @@ class TestRetry:
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         monkeypatch.setattr(mod, "_OSV_MAX_RETRIES", 3)
         responses = [_make_response(503), _make_response(502), _make_response(200, {"id": "X"})]
-        with patch.object(mod.requests, "get", side_effect=responses):
-            with patch.object(mod.time, "sleep"):
+        with patch("manus_agent.utils.http_retry.requests.get", side_effect=responses):
+            with patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = mod._osv_get_with_retry("CVE-1")
         assert resp.status_code == 200
 
     def test_returns_last_retryable_after_exhaustion(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         monkeypatch.setattr(mod, "_OSV_MAX_RETRIES", 2)
-        with patch.object(mod.requests, "get", return_value=_make_response(500)):
-            with patch.object(mod.time, "sleep"):
+        with patch("manus_agent.utils.http_retry.requests.get", return_value=_make_response(500)):
+            with patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = mod._osv_get_with_retry("CVE-1")
         # After exhausting retries the final (still-500) response is returned.
         assert resp.status_code == 500
 
     def test_404_not_retried(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
-        with patch.object(mod.requests, "get", return_value=_make_response(404)) as g:
+        with patch("manus_agent.utils.http_retry.requests.get", return_value=_make_response(404)) as g:
             resp = mod._osv_get_with_retry("CVE-NOPE")
         assert resp.status_code == 404
         assert g.call_count == 1
@@ -239,16 +240,16 @@ class TestRetry:
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         monkeypatch.setattr(mod, "_OSV_MAX_RETRIES", 3)
         side = [requests.exceptions.ConnectionError("boom"), _make_response(200, {"id": "X"})]
-        with patch.object(mod.requests, "get", side_effect=side):
-            with patch.object(mod.time, "sleep"):
+        with patch("manus_agent.utils.http_retry.requests.get", side_effect=side):
+            with patch("manus_agent.utils.http_retry.time.sleep"):
                 resp = mod._osv_get_with_retry("CVE-1")
         assert resp.status_code == 200
 
     def test_timeout_raised_after_exhaustion(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         monkeypatch.setattr(mod, "_OSV_MAX_RETRIES", 2)
-        with patch.object(mod.requests, "get", side_effect=requests.exceptions.Timeout("t")):
-            with patch.object(mod.time, "sleep"):
+        with patch("manus_agent.utils.http_retry.requests.get", side_effect=requests.exceptions.Timeout("t")):
+            with patch("manus_agent.utils.http_retry.time.sleep"):
                 with pytest.raises(requests.exceptions.Timeout):
                     mod._osv_get_with_retry("CVE-1")
 
