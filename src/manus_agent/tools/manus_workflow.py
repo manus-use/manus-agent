@@ -1,23 +1,26 @@
 """Custom workflow tool that supports ManusUse agent types."""
 
+import copy
 import logging
 import uuid
 from typing import Any
 
 from strands.types.tools import ToolResult, ToolUse
-from strands_tools.workflow import TOOL_SPEC as BASE_TOOL_SPEC
 from strands_tools.workflow import WorkflowManager
+from strands_tools.workflow import workflow as _base_workflow_tool
 
 from ..agents import BrowserUseAgent, DataAnalysisAgent, ManusAgent, MCPAgent
 from ..config import Config
 
 logger = logging.getLogger(__name__)
 
-# Copy the tool spec from base but customize description
-TOOL_SPEC = BASE_TOOL_SPEC.copy()
+# Build TOOL_SPEC from the base workflow tool's spec (strands_tools removed the
+# standalone TOOL_SPEC export; the canonical source is now workflow.tool_spec).
+_BASE_TOOL_SPEC = _base_workflow_tool.tool_spec
+TOOL_SPEC = copy.deepcopy(_BASE_TOOL_SPEC)
 TOOL_SPEC["name"] = "manus_workflow"
 TOOL_SPEC["description"] = (
-    TOOL_SPEC["description"]
+    _BASE_TOOL_SPEC["description"]
     + """
 This version supports ManusUse agent types:
 - manus: General computation and file operations
@@ -28,11 +31,14 @@ This version supports ManusUse agent types:
 )
 
 # Add agent_type to the task schema
-TOOL_SPEC["inputSchema"]["json"]["properties"]["tasks"]["items"]["properties"]["agent_type"] = {
-    "type": "string",
-    "enum": ["manus", "browser", "data_analysis", "mcp"],
-    "description": "Agent type to use for executing this task (defaults to 'manus')",
-    "default": "manus",
+TOOL_SPEC["inputSchema"]["json"]["properties"]["tasks"]["items"]["properties"] = {
+    **TOOL_SPEC["inputSchema"]["json"]["properties"]["tasks"]["items"].get("properties", {}),
+    "agent_type": {
+        "type": "string",
+        "enum": ["manus", "browser", "data_analysis", "mcp"],
+        "description": "Agent type to use for executing this task (defaults to 'manus')",
+        "default": "manus",
+    },
 }
 
 
