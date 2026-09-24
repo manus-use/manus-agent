@@ -1935,6 +1935,137 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+def _build_sbom_scan_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent sbom-scan",
+        description=(
+            "Scan a CycloneDX or SPDX SBOM (JSON) for known vulnerabilities.\n"
+            "Queries OSV.dev in batch, enriches findings with EPSS scores and\n"
+            "CISA KEV membership, and ranks results by exploited-in-wild status\n"
+            "then EPSS score."
+        ),
+        add_help=True,
+    )
+    p.add_argument(
+        "sbom_file",
+        metavar="BOM-FILE",
+        help="Path to a CycloneDX (JSON) or SPDX (JSON) SBOM file.",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_sbom_scan(argv: list[str]) -> int:
+    import json as _json
+
+    parser = _build_sbom_scan_parser()
+    args = parser.parse_args(argv)
+
+    try:
+        from manus_agent.tools.scan_sbom import scan_sbom_file
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = scan_sbom_file(args.sbom_file)
+
+    if "error" in result:
+        print(f"Error: {result['error']}", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # Text output
+    sbom_fmt = result.get("sbom_format", "unknown")
+    comp_count = result.get("component_count", 0)
+    vuln_count = result.get("total_vulnerability_count", 0)
+    vuln_comp = result.get("vulnerable_component_count", 0)
+
+    print()
+    print(f"SBOM Vulnerability Scan — {sbom_fmt.upper()}")
+    print("=" * 60)
+    print(f"Components scanned:      {comp_count}")
+    print(f"Vulnerable components:   {vuln_comp}")
+    print(f"Total vulnerabilities:   {vuln_count}")
+    print()
+
+    crit = result.get("critical_count", 0)
+    high = result.get("high_count", 0)
+    med = result.get("medium_count", 0)
+    low = result.get("low_count", 0)
+    unk = result.get("unknown_count", 0)
+    kev = result.get("kev_count", 0)
+
+    print("Severity breakdown:")
+    if crit:
+        print(f"  CRITICAL: {crit}")
+    if high:
+        print(f"  HIGH:     {high}")
+    if med:
+        print(f"  MEDIUM:   {med}")
+    if low:
+        print(f"  LOW:      {low}")
+    if unk:
+        print(f"  UNKNOWN:  {unk}")
+    if kev:
+        print(f"  Exploited-in-wild (CISA KEV): {kev}")
+    if not any([crit, high, med, low, unk]):
+        print("  (none)")
+    print()
+
+    findings = result.get("findings", [])
+    if not findings:
+        print("No known vulnerabilities found. \N{CHECK MARK}")
+        return 0
+
+    # Print top findings
+    for i, f in enumerate(findings):
+        comp = f.get("component", {})
+        vuln = f.get("vulnerability", {})
+
+        comp_name = comp.get("name", "unknown")
+        comp_ver = comp.get("version", "")
+        comp_eco = comp.get("ecosystem", "")
+        vuln_id = vuln.get("id", "")
+        cve_ids = vuln.get("cve_ids", [])
+        severity = vuln.get("severity", "UNKNOWN")
+        cvss = vuln.get("cvss_score")
+        epss = vuln.get("epss_score")
+        in_kev = vuln.get("in_kev", False)
+        summary = vuln.get("summary", "")
+
+        label = f"{comp_name}"
+        if comp_ver:
+            label += f"@{comp_ver}"
+        if comp_eco:
+            label += f" ({comp_eco})"
+
+        print(f"[{i + 1}] {label}")
+        print(f"    ID:       {vuln_id}")
+        if cve_ids:
+            print(f"    CVEs:     {', '.join(cve_ids)}")
+        print(f"    Severity: {severity}", end="")
+        if cvss is not None:
+            print(f" (CVSS {cvss:.1f})", end="")
+        print()
+        if epss is not None:
+            print(f"    EPSS:     {epss:.4f}")
+        if in_kev:
+            print("    KEV:      \u26a0\ufe0f  EXPLOITED IN WILD (CISA KEV)")
+        if summary:
+            print(f"    Summary:  {summary[:100]}")
+        print()
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2399,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "sbom-scan":
+        idx = argv.index("sbom-scan")
+        sys.exit(_run_sbom_scan(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
