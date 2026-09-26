@@ -19,6 +19,7 @@ from rich.table import Table
 from . import __version__
 from .config import Config
 from .multi_agents import Orchestrator
+from .utils.cve_utils import validate_cve_id
 
 console = Console()
 
@@ -1332,8 +1333,8 @@ def _run_compare(argv: list[str]) -> int:
     cve_id_b = args.cve_id_b.strip()
 
     for cid in (cve_id_a, cve_id_b):
-        if not cid.upper().startswith("CVE-"):
-            print(f"[error] Invalid CVE ID '{cid}'. Must be like 'CVE-YYYY-NNNN'.", file=sys.stderr)
+        if (err_msg := validate_cve_id(cid)) is not None:
+            print(f"[error] {err_msg}", file=sys.stderr)
             return 1
 
     try:
@@ -1397,10 +1398,9 @@ def _run_exploit_complexity(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     cve_id: str = args.cve_id.strip()
-    import re as _re
 
-    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
-        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+    if (err_msg := validate_cve_id(cve_id)) is not None:
+        parser.error(err_msg)
 
     try:
         from manus_agent.tools.score_exploit_complexity import _render_text, _run_scoring
@@ -1460,8 +1460,8 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
     args = parser.parse_args(argv)
     cve_id: str = args.cve_id.strip()
 
-    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
-        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+    if (err_msg := validate_cve_id(cve_id)) is not None:
+        parser.error(err_msg)
 
     try:
         from manus_agent.tools.search_poc_sources import aggregate_poc_results

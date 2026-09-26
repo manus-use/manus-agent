@@ -16,6 +16,8 @@ import re
 
 from strands import tool
 
+from manus_agent.utils.cve_utils import extract_cve_year, validate_cve_id
+
 __all__ = ["get_trickest_pocs"]
 
 _RAW_URL = "https://raw.githubusercontent.com/trickest/cve/main/{year}/{cve_id}.md"
@@ -108,11 +110,10 @@ def get_trickest_pocs(cve_id: str) -> str:
 
     cve_id = cve_id.strip().upper()
 
-    match = _CVE_YEAR_RE.match(cve_id)
-    if not match:
-        return f"Invalid CVE ID format: {cve_id!r}. Expected format: CVE-YYYY-NNNNN"
+    if (err_msg := validate_cve_id(cve_id)) is not None:
+        return err_msg
 
-    year = match.group(1)
+    year = str(extract_cve_year(cve_id))
     url = _RAW_URL.format(year=year, cve_id=cve_id)
 
     try:

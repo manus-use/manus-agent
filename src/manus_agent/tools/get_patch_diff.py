@@ -23,6 +23,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 # ---------------------------------------------------------------------------
 # Bug-class keyword mapping (applied to the unified diff text)
@@ -463,14 +464,9 @@ def get_patch_diff(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool["input"]
     cve_id = tool_input.get("cve_id", "")
 
-    if not isinstance(cve_id, str) or not cve_id.upper().startswith("CVE-"):
-        result: ToolResult = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID format. Must be a string like 'CVE-YYYY-NNNN'."}],
-        }
-        log_tool_output_size("get_patch_diff", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("get_patch_diff", err)
+        return err
 
     payload = fetch_and_summarise(cve_id)
 

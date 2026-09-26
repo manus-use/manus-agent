@@ -10,6 +10,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 TOOL_SPEC = {
     "name": "query_threat_intelligence_feeds",
@@ -38,14 +39,9 @@ def query_threat_intelligence_feeds(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool["input"]
     cve_id = tool_input.get("cve_id")
 
-    if not isinstance(cve_id, str) or not cve_id.strip():
-        result = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID. Must be a non-empty string."}],
-        }
-        log_tool_output_size("query_threat_intelligence_feeds", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("query_threat_intelligence_feeds", err)
+        return err
 
     # Curated list of public threat intelligence feeds (example URLs)
     # In a real-world scenario, this list would be more extensive and potentially configurable.

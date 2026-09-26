@@ -13,6 +13,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 # Threshold: a jump of this magnitude in a single week is flagged as a significant spike
 _SPIKE_THRESHOLD = 0.10
@@ -142,14 +143,9 @@ def get_epss_trend(tool: ToolUse, **kwargs: Any) -> ToolResult:
     cve_id = tool_input.get("cve_id", "")
     days = int(tool_input.get("days", 30))
 
-    if not isinstance(cve_id, str) or not cve_id.upper().startswith("CVE-"):
-        result: ToolResult = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID format. Must be a string like 'CVE-YYYY-NNNN'."}],
-        }
-        log_tool_output_size("get_epss_trend", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("get_epss_trend", err)
+        return err
 
     try:
         raw = _fetch_epss_time_series(cve_id, days)

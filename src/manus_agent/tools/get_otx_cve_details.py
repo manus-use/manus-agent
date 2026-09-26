@@ -13,6 +13,7 @@ from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.config import Config
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 TOOL_SPEC = {
     "name": "get_otx_cve_details",
@@ -44,14 +45,9 @@ def get_otx_cve_details(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool["input"]
     cve_id = tool_input.get("cve_id")
 
-    if not isinstance(cve_id, str) or not cve_id.upper().startswith("CVE-"):
-        result = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID format. Must be a string like 'CVE-YYYY-NNNN'."}],
-        }
-        log_tool_output_size("get_otx_cve_details", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("get_otx_cve_details", err)
+        return err
 
     try:
         config = Config.from_file()

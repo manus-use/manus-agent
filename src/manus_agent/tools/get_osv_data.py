@@ -34,6 +34,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error, is_valid_cve_id
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration (mirrors get_vulncheck_data conventions)
@@ -205,15 +206,15 @@ def fetch_osv_data(cve_id: str) -> dict[str, Any]:
     errors are captured in ``error`` with ``found=False``.
     """
     cve_id = (cve_id or "").strip()
-    if not cve_id:
+    if not is_valid_cve_id(cve_id):
         return {
             "found": False,
             "cve_id": cve_id,
             "records": [],
             "aliases": [],
             "affected_ecosystems": [],
-            "error": "Invalid CVE ID. Must be a non-empty string.",
-            "message": "Invalid CVE ID. Must be a non-empty string.",
+            "error": "Invalid CVE ID. Must be a non-empty string matching CVE-YYYY-NNNNN.",
+            "message": "Invalid CVE ID. Must be a non-empty string matching CVE-YYYY-NNNNN.",
         }
 
     records: list[dict[str, Any]] = []
@@ -315,14 +316,9 @@ def get_osv_data(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool.get("input", {}) or {}
     cve_id = tool_input.get("cve_id")
 
-    if not isinstance(cve_id, str) or not cve_id.strip():
-        result: ToolResult = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID. Must be a non-empty string."}],
-        }
-        log_tool_output_size("get_osv_data", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("get_osv_data", err)
+        return err
 
     payload = fetch_osv_data(cve_id)
     status = "success" if payload.get("found") else "error"
