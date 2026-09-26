@@ -31,6 +31,8 @@ from typing import Any
 
 from strands import tool
 
+from manus_agent.utils.cve_utils import extract_cve_year, is_valid_cve_id, validate_cve_id
+
 __all__ = ["search_poc_sources"]
 
 logger = logging.getLogger(__name__)
@@ -84,10 +86,10 @@ def _normalize_url(url: str) -> str:
 def _fetch_trickest(cve_id: str) -> list[dict]:
     """Return PoC entries from the trickest/cve GitHub tree."""
     results: list[dict] = []
-    m = _CVE_RE.match(cve_id)
-    if not m:
+    year = extract_cve_year(cve_id)
+    if year is None:
         return results
-    year = m.group(1)
+    year = str(year)
 
     tree_url = "https://api.github.com/repos/trickest/cve/git/trees/main?recursive=0"
     try:
@@ -454,9 +456,9 @@ def search_poc_sources(cve_id: str, sources: str = "") -> dict:
         exploited_in_wild.
     """
     cve_id = cve_id.strip()
-    if not _CVE_RE.match(cve_id):
+    if (err_msg := validate_cve_id(cve_id)) is not None:
         return {
-            "error": f"Invalid CVE identifier: {cve_id!r}",
+            "error": err_msg,
             "cve_id": cve_id,
             "total_found": 0,
             "exploited_in_wild": False,

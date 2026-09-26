@@ -313,7 +313,7 @@ class TestFetchOsvData:
     def test_transport_failure_captured(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
         with patch.object(mod, "_osv_get_with_retry", side_effect=requests.exceptions.Timeout("t")):
-            r = mod.fetch_osv_data("CVE-1")
+            r = mod.fetch_osv_data("CVE-2024-0001")
         assert r["found"] is False
         assert "failed" in r["message"].lower()
 
@@ -322,7 +322,7 @@ class TestFetchOsvData:
         resp = _make_response(200)
         resp.json.side_effect = ValueError("bad json")
         with patch.object(mod, "_osv_get_with_retry", return_value=resp):
-            r = mod.fetch_osv_data("CVE-1")
+            r = mod.fetch_osv_data("CVE-2024-0001")
         assert r["found"] is False
         assert "unusable" in r["message"].lower()
 
@@ -343,9 +343,9 @@ class TestFetchOsvData:
 
     def test_record_no_packages_no_ghsa_alias(self, monkeypatch):
         monkeypatch.setattr(mod, "_OSV_RETRY_BASE_DELAY", 0)
-        rec = {"id": "CVE-9", "aliases": ["CVE-other"], "affected": []}
+        rec = {"id": "CVE-2024-9999", "aliases": ["CVE-2024-0002"], "affected": []}
         with patch.object(mod, "_osv_get_with_retry", return_value=_make_response(200, rec)) as g:
-            r = mod.fetch_osv_data("CVE-9")
+            r = mod.fetch_osv_data("CVE-2024-9999")
         assert g.call_count == 1  # no GHSA alias to follow
         assert r["found"] is True
         assert r["affected_ecosystems"] == []

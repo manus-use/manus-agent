@@ -13,6 +13,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 TOOL_SPEC = {
     "name": "check_cisa_kev",
@@ -66,14 +67,9 @@ def check_cisa_kev(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool["input"]
     cve_id = tool_input.get("cve_id")
 
-    if not isinstance(cve_id, str) or not cve_id.strip():
-        result = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID. Must be a non-empty string."}],
-        }
-        log_tool_output_size("check_cisa_kev", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("check_cisa_kev", err)
+        return err
 
     kev_data = _get_kev_data()
     if not kev_data or "vulnerabilities" not in kev_data:

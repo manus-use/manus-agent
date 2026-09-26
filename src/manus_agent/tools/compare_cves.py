@@ -14,6 +14,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 TOOL_SPEC = {
     "name": "compare_cves",
@@ -463,14 +464,9 @@ def compare_cves(tool: ToolUse, **kwargs: Any) -> ToolResult:
     cve_id_b = str(tool_input.get("cve_id_b", "")).strip()
 
     for cid in (cve_id_a, cve_id_b):
-        if not cid.upper().startswith("CVE-"):
-            result: ToolResult = {
-                "toolUseId": tool_use_id,
-                "status": "error",
-                "content": [{"text": f"Invalid CVE ID '{cid}'. Must be like 'CVE-YYYY-NNNN'."}],
-            }
-            log_tool_output_size("compare_cves", result)
-            return result
+        if (err := cve_validation_error(cid, tool_use_id)) is not None:
+            log_tool_output_size("compare_cves", err)
+            return err
 
     # Fetch both profiles and both KEV entries concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:

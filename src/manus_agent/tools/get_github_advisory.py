@@ -8,6 +8,7 @@ from strands.tools import tool
 
 from manus_agent.config import Config
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import validate_cve_id
 
 
 @tool
@@ -23,8 +24,8 @@ def get_github_advisory(cve_id: str) -> dict[str, Any]:
     Returns:
         A dictionary containing the advisory data from GitHub if found, otherwise a message indicating it was not found or an error.
     """
-    if not cve_id or not isinstance(cve_id, str) or not cve_id.upper().startswith("CVE-"):
-        result = {"error": "Invalid CVE ID format. It must be a string starting with 'CVE-'."}
+    if (err_msg := validate_cve_id(cve_id)) is not None:
+        result = {"error": err_msg}
         log_tool_output_size("get_github_advisory", {"content": [{"json": result}]})
         return result
 

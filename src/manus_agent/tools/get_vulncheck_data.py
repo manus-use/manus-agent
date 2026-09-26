@@ -23,6 +23,7 @@ import requests
 from strands.types.tools import ToolResult, ToolUse
 
 from manus_agent.tools.tool_output_logger import log_tool_output_size
+from manus_agent.utils.cve_utils import cve_validation_error
 
 # ---------------------------------------------------------------------------
 # Retry / back-off configuration
@@ -270,14 +271,9 @@ def get_vulncheck_data(tool: ToolUse, **kwargs: Any) -> ToolResult:
     tool_input = tool["input"]
     cve_id: str = tool_input.get("cve_id", "")
 
-    if not isinstance(cve_id, str) or not cve_id.upper().startswith("CVE-"):
-        result: ToolResult = {
-            "toolUseId": tool_use_id,
-            "status": "error",
-            "content": [{"text": "Invalid CVE ID format. Must be a string like 'CVE-YYYY-NNNN'."}],
-        }
-        log_tool_output_size("get_vulncheck_data", result)
-        return result
+    if (err := cve_validation_error(cve_id, tool_use_id)) is not None:
+        log_tool_output_size("get_vulncheck_data", err)
+        return err
 
     cve_id = cve_id.upper()
     api_key = os.environ.get("VULNCHECK_API_KEY", "").strip()
