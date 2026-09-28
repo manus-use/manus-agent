@@ -2283,6 +2283,46 @@ def main() -> None:
             )
         )
 
+    if first_positional == "tool-inventory":
+        idx = argv.index("tool-inventory")
+        sub_argv = argv[idx + 1 :]
+        import argparse as _ti_argparse
+
+        ti_parser = _ti_argparse.ArgumentParser(
+            prog="manus-agent tool-inventory",
+            description="Discover and audit all tools in the manus-agent framework.",
+        )
+        ti_parser.add_argument(
+            "--format",
+            choices=["table", "json"],
+            default="table",
+            help="Output format (default: table)",
+        )
+        ti_parser.add_argument(
+            "--agent",
+            type=str,
+            default=None,
+            help="Filter tools by agent (e.g. vi, manus, discovery, remediation, variant)",
+        )
+        ti_parser.add_argument(
+            "--verbose",
+            "-v",
+            action="store_true",
+            default=False,
+            help="Show detailed per-tool information",
+        )
+        ti_args = ti_parser.parse_args(sub_argv)
+
+        from manus_agent.tools.tool_inventory import tool_inventory
+
+        output = tool_inventory(
+            output_format=ti_args.format,
+            agent_filter=ti_args.agent,
+            verbose=ti_args.verbose,
+        )
+        print(output)
+        sys.exit(0)
+
     if first_positional == "remediate":
         idx = argv.index("remediate")
         remediate_args = _build_remediate_parser().parse_args(argv[idx + 1 :])
