@@ -1935,6 +1935,96 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# correlate subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_correlate_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for the ``correlate`` subcommand."""
+    parser = argparse.ArgumentParser(
+        prog="manus-agent correlate",
+        description=(
+            "Cross-reference CVE correlation: finds related vulnerabilities "
+            "sharing the same affected component (CPE) or root-cause weakness (CWE)."
+        ),
+    )
+    parser.add_argument(
+        "cve_id",
+        metavar="CVE-ID",
+        help="Seed CVE identifier (e.g. CVE-2024-3094)",
+    )
+    parser.add_argument(
+        "--max-results",
+        type=int,
+        default=20,
+        metavar="N",
+        help="Max correlated CVEs per dimension (default: 20, max: 50)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return parser
+
+
+def _run_correlate(argv: list[str]) -> int:
+    """Run the CVE correlation tool and print results."""
+    args = _build_correlate_parser().parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not re.match(r"^CVE-\d{4}-\d{4,}$", cve_id):
+        console.print("[red]\u2717 Invalid CVE ID format. Expected: CVE-YYYY-NNNN[/red]")
+        return 1
+
+    from manus_agent.tools.correlate_cves import correlate_cves
+
+    tool_input: dict = {
+        "toolUseId": "cli-correlate",
+        "input": {
+            "cve_id": cve_id,
+            "max_results": args.max_results,
+        },
+    }
+
+    with console.status(f"Correlating {cve_id}\u2026", spinner="dots"):
+        result = correlate_cves(tool_input)
+
+    if result.get("status") == "error":
+        for item in result.get("content", []):
+            if "text" in item:
+                console.print(f"[red]\u2717 {item['text']}[/red]")
+        return 1
+
+    if args.output == "json":
+        for item in result.get("content", []):
+            if "json" in item:
+                console.print_json(data=item["json"])
+                return 0
+        # Fallback: wrap text in JSON
+        text = ""
+        for item in result.get("content", []):
+            if "text" in item:
+                text = item["text"]
+                break
+        console.print_json(data={"cve": cve_id, "report": text})
+    else:
+        for item in result.get("content", []):
+            if "text" in item:
+                console.print(
+                    Panel(
+                        item["text"],
+                        title=f"[bold green]{cve_id} Correlation[/bold green]",
+                        border_style="green",
+                    )
+                )
+                break
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2294,6 +2384,10 @@ def main() -> None:
                 config=config,
             )
         )
+
+    if first_positional == "correlate":
+        idx = argv.index("correlate")
+        sys.exit(_run_correlate(argv[idx + 1 :]))
 
     # Default: run / interactive
     run_parser = _build_run_parser()
