@@ -974,6 +974,25 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             console.print("  [yellow]![/yellow] Docker installed but daemon not running")
 
     # ------------------------------------------------------------------
+    # 5. API connectivity (opt-in via --apis)
+    # ------------------------------------------------------------------
+    if getattr(args, "apis", False):
+        from manus_agent.tools.check_api_health import (
+            check_api_health,
+            print_api_health_report,
+        )
+
+        console.print("\n[bold]API connectivity[/bold]")
+        api_timeout = getattr(args, "timeout", 10.0)
+        report = check_api_health(timeout=api_timeout)
+        print_api_health_report(report)
+
+        for r in report["results"]:
+            if not r.get("ok"):
+                error = r.get("error", "unreachable")
+                issues.append(f"API {r['name']}: {error}")
+
+    # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------
     console.print()
@@ -2083,6 +2102,19 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to a config.toml file to validate (overrides default search paths)",
+    )
+    parser.add_argument(
+        "--apis",
+        action="store_true",
+        default=False,
+        help="Probe external APIs (NVD, EPSS, OSV, CISA KEV, GitHub, VulnCheck) for connectivity and rate-limit status",
+    )
+    parser.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        type=float,
+        default=10.0,
+        help="Per-API timeout in seconds for --apis probes (default: 10)",
     )
     return parser
 
