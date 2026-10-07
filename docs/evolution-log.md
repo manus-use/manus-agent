@@ -1,5 +1,29 @@
 # Evolution Log
 
+## 2026-10-07 — feat(tools): check_api_health + doctor --apis
+
+Added `check_api_health` Strands tool and wired `--apis` / `--timeout` flags into the `doctor` CLI subcommand. Probes all 6 external vulnerability-intelligence APIs (NVD, EPSS, OSV.dev, CISA KEV, GitHub Advisories, VulnCheck KEV) in parallel, reporting connectivity, latency, rate-limit headroom, and API-key validity.
+
+### Changes
+
+- **New file:** `src/manus_agent/tools/check_api_health.py` (~350 lines)
+  - `_PROBES` list with all 6 API endpoints, lightweight HEAD/GET requests
+  - `_run_single_probe()` — runs a single probe, captures status/latency/rate-limit headers
+  - `check_api_health()` — parallel orchestrator via `ThreadPoolExecutor`
+  - `print_api_health_report()` — Rich table output with plain-text fallback
+  - `check_api_health_tool()` — Strands tool entry point (text + JSON output)
+- **Modified:** `src/manus_agent/cli.py`
+  - Added `--apis` flag to `_build_doctor_parser()`
+  - Added `--timeout` flag (default 10s) for per-API probe timeout
+  - Wired API health check into `_cmd_doctor()` before summary section
+- **New file:** `tests/test_check_api_health.py` — 75 tests, 100% mocked
+  - Header builders, probe runner (all HTTP status codes, timeouts, errors, rate limits)
+  - Orchestrator, text/Rich/plain formatting, Strands tool interface
+  - CLI flag parsing, doctor integration
+
+**PR:** [#213](https://github.com/manus-use/manus-agent/pull/213)
+**Tests:** 1233 passed (75 new), 0 failures
+
 ## 2026-06-24 — chore: ruff lint cleanup
 
 Ran full ruff lint pass (`E`, `F`, `I`, `N`, `W`, `B`, `UP` rules, target Python 3.10).
