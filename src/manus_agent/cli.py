@@ -8,6 +8,7 @@ import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 import toml
 from rich.console import Console
@@ -1057,6 +1058,7 @@ _SUBCOMMANDS = {
     "poc-search",
     "changelog",
     "blast-radius",
+    "version-range",
 }
 
 
@@ -1935,6 +1937,148 @@ def _run_blast_radius(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# version-range subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_version_range_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent version-range",
+        description=(
+            "Resolve a CVE to its affected packages and version ranges.\n"
+            "Walks NVD CPE configurations and cross-references OSV.dev ecosystem\n"
+            "databases (PyPI, npm, Maven, Go, RubyGems, crates.io, NuGet, Packagist)\n"
+            "to produce structured vulnerable version ranges, a list of known affected\n"
+            "releases, and the first patched release per package."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2021-44228")
+    p.add_argument(
+        "--ecosystem",
+        choices=["auto", "pypi", "npm", "maven", "go", "crates.io", "rubygems", "nuget", "packagist"],
+        default="auto",
+        help="Force a specific ecosystem (default: auto — returns all)",
+    )
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_version_range(argv: list[str]) -> int:
+    parser = _build_version_range_parser()
+    args = parser.parse_args(argv)
+    cve_id = args.cve_id.strip().upper()
+
+    if not cve_id:
+        parser.error("CVE-ID is required")
+
+    import re as _re
+
+    if not _re.match(r"^CVE-\d{4}-\d{4,}$", cve_id, _re.IGNORECASE):
+        print(f"[error] Invalid CVE ID format: {cve_id}", file=sys.stderr)
+        return 1
+
+    try:
+        from manus_agent.tools.get_version_range import (
+            _fetch_nvd_version_ranges,
+            _fetch_osv_version_ranges,
+            _merge_results,
+        )
+    except ImportError as exc:  # pragma: no cover
+        print(f"[error] missing dependencies: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        nvd_ranges = _fetch_nvd_version_ranges(cve_id)
+    except Exception as exc:
+        print(f"[error] NVD API request failed: {exc}", file=sys.stderr)
+        nvd_ranges = []
+
+    try:
+        osv_ranges = _fetch_osv_version_ranges(cve_id)
+    except Exception as exc:
+        print(f"[error] OSV.dev API request failed: {exc}", file=sys.stderr)
+        osv_ranges = []
+
+    merged = _merge_results(nvd_ranges, osv_ranges, args.ecosystem)
+
+    if not merged:
+        print(f"No affected version range data found for {cve_id}.", file=sys.stderr)
+        return 1
+
+    if args.output == "json":
+        import json
+
+        output = {
+            "cve_id": cve_id,
+            "ecosystem_filter": args.ecosystem,
+            "packages_affected": len(merged),
+            "packages": [],
+        }
+        for entry in merged:
+            pkg: dict[str, Any] = {
+                "source": entry["source"],
+                "ecosystem": entry["ecosystem"],
+                "package": entry["package"],
+                "vulnerable_range": entry["vulnerable_range"],
+                "first_patched": entry.get("first_patched", ""),
+            }
+            if entry.get("last_affected"):
+                pkg["last_affected"] = entry["last_affected"]
+            if entry.get("affected_versions"):
+                pkg["affected_versions_count"] = len(entry["affected_versions"])
+                pkg["affected_versions"] = entry["affected_versions"][:50]
+            if entry.get("severity"):
+                pkg["severity"] = entry["severity"]
+            if entry.get("cpe"):
+                pkg["cpe"] = entry["cpe"]
+            output["packages"].append(pkg)
+
+        print(json.dumps(output, indent=2))
+        return 0
+
+    # ---- text output ----
+    print(f"Affected version ranges for {cve_id}")
+    print(f"  Packages affected: {len(merged)}")
+    if args.ecosystem != "auto":
+        print(f"  Ecosystem filter:  {args.ecosystem}")
+    print()
+
+    for i, entry in enumerate(merged, 1):
+        eco = entry.get("ecosystem", "unknown")
+        pkg = entry.get("package", "unknown")
+        src = entry.get("source", "")
+        vr = entry.get("vulnerable_range", "")
+        fp = entry.get("first_patched", "")
+        la = entry.get("last_affected", "")
+        av = entry.get("affected_versions", [])
+
+        print(f"  [{i}] {eco}/{pkg}  (source: {src})")
+        print(f"      Vulnerable range : {vr}")
+        if fp:
+            print(f"      First patched    : {fp}")
+        if la:
+            print(f"      Last affected    : {la}")
+        if av:
+            shown = av[:20]
+            print(f"      Affected versions: {', '.join(shown)}")
+            if len(av) > 20:
+                print(f"                         ... and {len(av) - 20} more")
+        if entry.get("severity"):
+            print(f"      Severity         : {', '.join(entry['severity'])}")
+        if entry.get("cpe"):
+            print(f"      CPE              : {entry['cpe']}")
+        print()
+
+    return 0
+
+
 def _build_run_parser() -> argparse.ArgumentParser:
     """Build the top-level run/interactive parser."""
     parser = argparse.ArgumentParser(
@@ -2268,6 +2412,10 @@ def main() -> None:
     if first_positional == "blast-radius":
         idx = argv.index("blast-radius")
         sys.exit(_run_blast_radius(argv[idx + 1 :]))
+
+    if first_positional == "version-range":
+        idx = argv.index("version-range")
+        sys.exit(_run_version_range(argv[idx + 1 :]))
 
     if first_positional == "discover":
         idx = argv.index("discover")
