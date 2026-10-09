@@ -1055,6 +1055,7 @@ _SUBCOMMANDS = {
     "compare",
     "exploit-complexity",
     "poc-search",
+    "poc-freshness",
     "changelog",
     "blast-radius",
 }
@@ -1524,6 +1525,113 @@ def _run_poc_search(argv: list[str]) -> int:  # noqa: C901
         date = (r.get("published") or "")[:col_date]
         url = (r.get("url") or "")[:col_url]
         print(f"{src:<{col_src}}  {eaw_flag:<{col_eaw}}  {title:<{col_title}}  {date:<{col_date}}  {url}")
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# poc-freshness subcommand
+# ---------------------------------------------------------------------------
+
+
+def _build_poc_freshness_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="manus-agent poc-freshness",
+        description=(
+            "Measure how recently PoC activity occurred for a CVE.\n"
+            "Checks GitHub repos, Exploit-DB entries, and trickest/cve PoC links.\n"
+            "Returns a 0-100 freshness score: 80-100=hot, 50-79=warm, 20-49=cooling, 0-19=stale."
+        ),
+        add_help=True,
+    )
+    p.add_argument("cve_id", metavar="CVE-ID", help="CVE identifier, e.g. CVE-2024-3094")
+    p.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return p
+
+
+def _run_poc_freshness(argv: list[str]) -> int:
+    import json as _json
+    import re as _re
+
+    parser = _build_poc_freshness_parser()
+    args = parser.parse_args(argv)
+    cve_id: str = args.cve_id.strip()
+
+    if not _re.match(r"CVE-\d{4}-\d+", cve_id, _re.IGNORECASE):
+        parser.error(f"Invalid CVE ID: {cve_id!r}. Expected format: CVE-YYYY-NNNNN")
+
+    try:
+        from manus_agent.tools.get_poc_freshness import fetch_poc_freshness
+    except ImportError as exc:  # pragma: no cover
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    result = fetch_poc_freshness(cve_id)
+
+    if args.output == "json":
+        print(_json.dumps(result, indent=2))
+        return 0
+
+    # ---- text output ----
+    score = result.get("freshness_score", 0)
+    label = result.get("label", "unknown")
+    summary = result.get("summary", "")
+    newest = result.get("newest_activity")
+    days = result.get("days_since_activity")
+    gh_repos = result.get("github_repos", 0)
+    gh_stars = result.get("github_stars", 0)
+    gh_forks = result.get("github_forks", 0)
+    edb_entries = result.get("exploitdb_entries", 0)
+    trickest_pocs = result.get("trickest_pocs", 0)
+    total_pocs = result.get("total_pocs", 0)
+    sources_checked = result.get("sources_checked", [])
+    sources_failed = result.get("sources_failed", [])
+    components = result.get("components", {})
+
+    # Emoji indicator
+    if label == "hot":
+        indicator = "🔥"
+    elif label == "warm":
+        indicator = "🟡"
+    elif label == "cooling":
+        indicator = "🟠"
+    else:
+        indicator = "🧊"
+
+    print()
+    print(f"  PoC Freshness: {cve_id.upper()}")
+    print(f"  {indicator} Score: {score}/100 ({label.upper()})")
+    print()
+    print(f"  Summary: {summary}")
+    print()
+    print("  Sources:")
+    print(f"    Checked : {', '.join(sources_checked) if sources_checked else '—'}")
+    if sources_failed:
+        print(f"    Failed  : {', '.join(sources_failed)}")
+    print()
+    print("  Breakdown:")
+    print(f"    GitHub repos   : {gh_repos} ({gh_stars} stars, {gh_forks} forks)")
+    print(f"    Exploit-DB     : {edb_entries} entry/entries")
+    print(f"    trickest/cve   : {trickest_pocs} PoC link(s)")
+    print(f"    Total PoCs     : {total_pocs}")
+    print()
+    if newest:
+        days_str = f" ({int(days)} days ago)" if days is not None else ""
+        print(f"  Newest activity  : {newest}{days_str}")
+    else:
+        print("  Newest activity  : no datable activity found")
+    print()
+    print("  Score components:")
+    print(f"    Recency   (40%): {components.get('recency', 0):.2f}")
+    print(f"    Volume    (25%): {components.get('volume', 0):.2f}")
+    print(f"    Stars     (20%): {components.get('stars', 0):.2f}")
+    print(f"    Exploit-DB(15%): {components.get('exploitdb', 0):.2f}")
+    print()
 
     return 0
 
@@ -2260,6 +2368,10 @@ def main() -> None:
     if first_positional == "poc-search":
         idx = argv.index("poc-search")
         sys.exit(_run_poc_search(argv[idx + 1 :]))
+
+    if first_positional == "poc-freshness":
+        idx = argv.index("poc-freshness")
+        sys.exit(_run_poc_freshness(argv[idx + 1 :]))
 
     if first_positional == "changelog":
         idx = argv.index("changelog")
