@@ -2198,6 +2198,103 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── sbom-scan subcommand ─────────────────────────────────────────────────
+
+
+def _build_sbom_scan_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for ``manus-agent sbom-scan``."""
+    parser = argparse.ArgumentParser(
+        prog="manus-agent sbom-scan",
+        description=(
+            "Scan a CycloneDX or SPDX SBOM for known vulnerabilities. "
+            "Queries OSV.dev in batch, enriches findings with EPSS scores "
+            "and CISA KEV status, and ranks results by urgency."
+        ),
+    )
+    parser.add_argument(
+        "sbom_file",
+        help="Path to the SBOM file (CycloneDX JSON/XML or SPDX JSON)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text)",
+    )
+    return parser
+
+
+def _run_sbom_scan(argv: list[str]) -> int:
+    """Run the sbom-scan subcommand."""
+    args = _build_sbom_scan_parser().parse_args(argv)
+    sbom_path = args.sbom_file
+    output_fmt = args.output
+
+    from manus_agent.tools.scan_sbom import (
+        _fetch_epss_scores,
+        _fetch_kev_cve_set,
+        _query_osv_batch,
+        build_scan_results,
+        format_text_report,
+        parse_sbom,
+    )
+
+    # 1. Parse
+    try:
+        components = parse_sbom(sbom_path)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if not components:
+        print(
+            "SBOM parsed but no components with recognised ecosystems found.\nEnsure packages have purl identifiers.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"Scanning {len(components)} components against OSV.dev …", file=sys.stderr)
+
+    # 2. Query OSV.dev
+    try:
+        osv_results = _query_osv_batch(components)
+    except Exception as exc:
+        print(f"Error querying OSV.dev: {exc}", file=sys.stderr)
+        return 1
+
+    # 3. Collect CVE IDs for EPSS
+    all_cve_ids: set[str] = set()
+    for vulns in osv_results.values():
+        for vuln in vulns:
+            vid = vuln.get("id", "")
+            if vid.startswith("CVE-"):
+                all_cve_ids.add(vid)
+            for alias in vuln.get("aliases", []):
+                if alias.startswith("CVE-"):
+                    all_cve_ids.add(alias)
+
+    # 4. Enrich with EPSS + KEV
+    if all_cve_ids:
+        print(
+            f"Enriching {len(all_cve_ids)} CVEs with EPSS + KEV data …",
+            file=sys.stderr,
+        )
+    epss_scores = _fetch_epss_scores(sorted(all_cve_ids))
+    kev_set = _fetch_kev_cve_set()
+
+    # 5. Build report
+    report = build_scan_results(components, osv_results, epss_scores, kev_set)
+
+    if output_fmt == "json":
+        import json as _json
+
+        print(_json.dumps(report, indent=2))
+    else:
+        print(format_text_report(report))
+
+    return 0
+
+
 def main() -> None:
     """Main CLI entry point."""
     argv = sys.argv[1:]
@@ -2294,6 +2391,10 @@ def main() -> None:
                 config=config,
             )
         )
+
+    if first_positional == "sbom-scan":
+        idx = argv.index("sbom-scan")
+        sys.exit(_run_sbom_scan(argv[idx + 1 :]))
 
     # Default: run / interactive
     run_parser = _build_run_parser()
